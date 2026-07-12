@@ -1,5 +1,29 @@
+# Environment / secrets
 .env
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Logs
 logs/
+*.log
+
+# Generated data (raw datasets are tracked, these are runtime outputs)
+data/annotated/
+data/output/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

@@ -39,6 +39,23 @@ def timestamp_now() -> str:
     return datetime.utcnow().isoformat()
 
 
+def build_conversation_text(item: Dict[str, Any]) -> str:
+    """Turn a dataset item's query messages into a User/Assistant transcript"""
+    query = item.get("input", {}).get("query", {})
+    messages = json.loads(query.get("content", "[]"))
+
+    turns = []
+    for message in messages:
+        role = message.get("role", "")
+        content = message.get("content", "")
+        if role == "system":
+            continue
+        label = "User" if role == "user" else "Assistant"
+        turns.append(f"{label}: {content}")
+
+    return "\n\n".join(turns)
+
+
 def parse_conversation_turns(
     conversation: str, delimiter: str = "\n\n"
 ) -> List[Dict[str, str]]:
