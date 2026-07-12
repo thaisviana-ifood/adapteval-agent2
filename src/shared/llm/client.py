@@ -3,11 +3,12 @@
 import asyncio
 from typing import Any, Optional
 from datetime import datetime
-import anthropic
+import openai
 
 from src.config import (
     LLM_MODEL,
     LLM_API_KEY,
+    LLM_BASE_URL,
     LLM_TEMPERATURE,
     LLM_MAX_TOKENS,
     LLM_TIMEOUT,
@@ -24,6 +25,7 @@ class LLMClient:
         self,
         model: str = LLM_MODEL,
         api_key: str = LLM_API_KEY,
+        base_url: str = LLM_BASE_URL,
         temperature: float = LLM_TEMPERATURE,
         max_tokens: int = LLM_MAX_TOKENS,
         timeout: int = LLM_TIMEOUT,
@@ -32,8 +34,8 @@ class LLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.async_client = anthropic.AsyncAnthropic(api_key=api_key)
+        self.client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        self.async_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
         self.call_count = 0
         self.last_call_time = None
 
@@ -56,18 +58,20 @@ class LLMClient:
         Returns:
             str: The generated response text
         """
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
         for attempt in range(max_retries):
             try:
                 logger.debug(f"LLM call attempt {attempt + 1}/{max_retries}")
 
-                messages = [{"role": "user", "content": prompt}]
-
-                response = self.client.messages.create(
+                response = self.client.chat.completions.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     messages=messages,
-                    system=system_prompt,
                     **kwargs,
                 )
 
@@ -77,16 +81,16 @@ class LLMClient:
                 logger.debug(
                     f"LLM call successful. Total calls: {self.call_count}"
                 )
-                return response.content[0].text
+                return response.choices[0].message.content
 
-            except anthropic.RateLimitError as e:
+            except openai.RateLimitError as e:
                 wait_time = 2 ** attempt
                 logger.warning(
                     f"Rate limited. Waiting {wait_time}s before retry..."
                 )
                 asyncio.run(asyncio.sleep(wait_time))
 
-            except anthropic.APIError as e:
+            except openai.APIError as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"API error on attempt {attempt + 1}: {e}")
                     asyncio.run(asyncio.sleep(2 ** attempt))
@@ -117,18 +121,20 @@ class LLMClient:
         Returns:
             str: The generated response text
         """
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
         for attempt in range(max_retries):
             try:
                 logger.debug(f"Async LLM call attempt {attempt + 1}/{max_retries}")
 
-                messages = [{"role": "user", "content": prompt}]
-
-                response = await self.async_client.messages.create(
+                response = await self.async_client.chat.completions.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     messages=messages,
-                    system=system_prompt,
                     **kwargs,
                 )
 
@@ -138,16 +144,16 @@ class LLMClient:
                 logger.debug(
                     f"Async LLM call successful. Total calls: {self.call_count}"
                 )
-                return response.content[0].text
+                return response.choices[0].message.content
 
-            except anthropic.RateLimitError as e:
+            except openai.RateLimitError as e:
                 wait_time = 2 ** attempt
                 logger.warning(
                     f"Rate limited. Waiting {wait_time}s before retry..."
                 )
                 await asyncio.sleep(wait_time)
 
-            except anthropic.APIError as e:
+            except openai.APIError as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"API error on attempt {attempt + 1}: {e}")
                     await asyncio.sleep(2 ** attempt)

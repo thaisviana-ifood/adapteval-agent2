@@ -4,6 +4,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -15,9 +19,10 @@ OUTPUT_DATA_DIR = DATA_DIR / "output"
 for directory in [RAW_DATA_DIR, ANNOTATED_DATA_DIR, OUTPUT_DATA_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
-# LLM Configuration
-LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-opus-4")
-LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
+# LLM Configuration (DeepSeek, OpenAI-compatible API)
+LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek-v4-pro")
+LLM_API_KEY: str = os.getenv("DEEP_SEEK_API_KEY", "")
+LLM_BASE_URL: str = os.getenv("DEEP_SEEK_BASE_URL", "https://api.deepseek.com")
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "60"))
@@ -56,7 +61,7 @@ ENABLE_CALIBRATION: bool = os.getenv("ENABLE_CALIBRATION", "True").lower() == "t
 
 def validate_config() -> bool:
     """Validate required configuration parameters"""
-    required = ["LLM_API_KEY"]
+    required = ["LLM_API_KEY", "LLM_MODEL"]
     missing = [param for param in required if not globals().get(param)]
 
     if missing:
