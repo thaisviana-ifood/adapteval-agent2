@@ -5,8 +5,9 @@ rule_generator, jury, metrics) and writes its result into a distinct state
 key, so the checkpointer persists the output of every stage.
 """
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from src.config import USE_POSTGRES_MEMORY
 from src.context_analysis import ContextAnalyzer
 from src.rule_generator import (
     TaskClassifier,
@@ -15,6 +16,13 @@ from src.rule_generator import (
     HeuristicChecker,
 )
 from src.jury import EvaluatorPanel, AccuracyCalculator, HumanInTheLoop
+from src.memory_manager import (
+    CacheManager,
+    CalibrationManager,
+    ErrorDetector,
+    HistoryTracker,
+    PostgresMemoryStore,
+)
 from src.metrics import FinalScoreCalculator
 from src.shared.logger import get_logger
 from src.shared.utils import parse_conversation_turns
@@ -127,6 +135,41 @@ class PipelineNodes:
         self.hitl = HumanInTheLoop()
         self.final_score_calc = FinalScoreCalculator()
 
+        # Memory management
+        self.cache = CacheManager()
+        self.memory_store = self._init_memory_store()
+        self.history = HistoryTracker(store=self.memory_store)
+        self.error_detector = ErrorDetector()
+        self.calibration = CalibrationManager()
+
+    def _init_memory_store(self) -> Optional[PostgresMemoryStore]:
+        """Initialize the PostgreSQL-backed memory store, if enabled"""
+        if not USE_POSTGRES_MEMORY:
+            return None
+
+        store = PostgresMemoryStore()
+        if store.connect():
+            store.ensure_schema()
+            logger.info("Connected to PostgreSQL memory store")
+            return store
+
+        logger.warning(
+            "USE_POSTGRES_MEMORY is enabled but the connection failed; "
+            "falling back to in-memory history only"
+        )
+        return None
+
+    def get_cached_evaluation(self, conversation: str) -> Optional[Dict[str, Any]]:
+        """Return a previously cached evaluation output for this exact
+        conversation, if any"""
+        return self.cache.get(self.cache._generate_key(conversation))
+
+    def cache_evaluation(
+        self, conversation: str, evaluation_output: Dict[str, Any]
+    ) -> None:
+        """Cache the evaluation output produced for this conversation"""
+        self.cache.set(self.cache._generate_key(conversation), evaluation_output)
+
     def context_analysis_node(self, state: PipelineState) -> Dict[str, Any]:
         """Node 1: Análise de Contexto"""
         conversation = state["conversation"]
@@ -201,6 +244,7 @@ class PipelineNodes:
         rules = state["rule_generation"]
         jury_result = state["jury_evaluation"]
         heuristics = rules.get("heuristics", {})
+        evaluation_id = state.get("evaluation_id", "")
 
         accuracy = self.accuracy_calc.calculate_accuracy(
             jury_result.get("average_score", 5.0),
@@ -211,12 +255,26 @@ class PipelineNodes:
             jury_result, heuristics, accuracy, context
         )
         report = self.final_score_calc.generate_report(
-            final_score, evaluation_id=state.get("evaluation_id", "")
+            final_score, evaluation_id=evaluation_id
         )
 
         evaluation_output = _build_evaluation_output(
             jury_result, heuristics, accuracy, final_score, report
         )
+
+        # Memory management: keep this evaluation in the jury's history and
+        # flag any structural issues in its own output
+        self.history.record_evaluation(
+            evaluation_id=evaluation_id,
+            task_type=rules.get("task_type", "general"),
+            final_score=final_score["final_score"],
+            confidence=final_score["overall_confidence"],
+            components=final_score.get("component_breakdown", {}),
+        )
+
+        errors = self.error_detector.detect_errors(final_score, {})
+        if errors:
+            logger.warning(f"Found {len(errors)} evaluation errors")
 
         logger.debug("Pipeline node 'metrics_aggregation' complete")
         return {

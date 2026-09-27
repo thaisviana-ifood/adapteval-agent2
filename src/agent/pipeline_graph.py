@@ -23,6 +23,7 @@ logger = get_logger(__name__)
 _exit_stack = ExitStack()
 _checkpointer: Optional[BaseCheckpointSaver] = None
 _graph: Optional[CompiledStateGraph] = None
+_nodes: Optional[PipelineNodes] = None
 
 
 def _build_postgres_dsn() -> str:
@@ -63,11 +64,27 @@ def get_checkpointer() -> BaseCheckpointSaver:
     return _checkpointer
 
 
+def get_pipeline_nodes() -> PipelineNodes:
+    """Return the process-wide PipelineNodes instance, creating it on first call
+
+    A single instance is shared by the compiled graph and by run_pipeline()
+    below, so the memory manager (cache, history, error detection) it owns
+    stays consistent across the whole pipeline run instead of being
+    duplicated per call.
+    """
+    global _nodes
+
+    if _nodes is None:
+        _nodes = PipelineNodes()
+
+    return _nodes
+
+
 def build_pipeline_graph(
     checkpointer: Optional[BaseCheckpointSaver] = None,
 ) -> CompiledStateGraph:
     """Build and compile the 4-node thesis pipeline graph"""
-    nodes = PipelineNodes()
+    nodes = get_pipeline_nodes()
 
     graph = StateGraph(PipelineState)
     graph.add_node("context_analysis", nodes.context_analysis_node)
@@ -119,6 +136,13 @@ def run_pipeline(
         confiança global, relatório de consolidação das métricas).
     """
     evaluation_id = evaluation_id or f"eval-{uuid.uuid4().hex[:12]}"
+    nodes = get_pipeline_nodes()
+
+    cached_output = nodes.get_cached_evaluation(conversation)
+    if cached_output is not None:
+        logger.info(f"Returning cached evaluation for {evaluation_id}")
+        return cached_output
+
     graph = get_pipeline_graph()
 
     config: Dict[str, Any] = {
@@ -144,4 +168,6 @@ def run_pipeline(
             config=config,
         )
 
-    return final_state["evaluation_output"]
+    evaluation_output = final_state["evaluation_output"]
+    nodes.cache_evaluation(conversation, evaluation_output)
+    return evaluation_output
