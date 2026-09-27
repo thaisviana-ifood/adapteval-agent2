@@ -34,7 +34,7 @@ class TestPromptManager:
         pm = PromptManager()
         template = pm.get_template("context_analysis")
         assert template is not None
-        assert "$" in template
+        assert "{{conversation}}" in template
 
     def test_format_prompt(self):
         """Test prompt formatting"""

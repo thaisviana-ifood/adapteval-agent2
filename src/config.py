@@ -63,6 +63,11 @@ CACHE_SIZE_MB: int = int(os.getenv("CACHE_SIZE_MB", "1024"))
 CACHE_TTL_HOURS: int = int(os.getenv("CACHE_TTL_HOURS", "24"))
 ENABLE_CALIBRATION: bool = os.getenv("ENABLE_CALIBRATION", "True").lower() == "true"
 
+# Langfuse Configuration (prompt management)
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST: str = os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
+
 
 def validate_config() -> bool:
     """Validate required configuration parameters"""

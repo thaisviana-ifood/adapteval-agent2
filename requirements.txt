@@ -1,6 +1,9 @@
 # LLM and AI (DeepSeek via OpenAI-compatible API)
 openai>=1.30.0
 
+# Prompt management and observability
+langfuse>=4.0.0
+
 # Data processing
 numpy>=1.24.0
 pandas>=2.0.0

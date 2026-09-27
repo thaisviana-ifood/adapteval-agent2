@@ -1,11 +1,22 @@
 """Semantic analysis of conversation content"""
 
 from typing import Dict, Any, List, Set
+from pathlib import Path
+from functools import lru_cache
 import re
 
 from src.shared.logger import get_logger
 
 logger = get_logger(__name__)
+
+_ENGLISH_WORDS_PATH = Path(__file__).parent / "resources" / "english_words.txt"
+
+
+@lru_cache(maxsize=1)
+def _load_english_words() -> Set[str]:
+    """Load the bundled English wordlist used to keep topics English-only"""
+    with open(_ENGLISH_WORDS_PATH, "r", encoding="utf-8") as f:
+        return {line.strip() for line in f if line.strip()}
 
 
 class SemanticAnalyzer:
@@ -117,14 +128,16 @@ class SemanticAnalyzer:
         return pos_count / total
 
     def _extract_topics(self, text: str) -> List[str]:
-        """Extract main topics from text"""
+        """Extract main topics from text, restricted to English words"""
         # Simple topic extraction based on frequency
         words = text.lower().split()
         word_freq = {}
+        english_words = _load_english_words()
 
         for word in words:
-            if len(word) > 4:  # Skip short words
-                word_freq[word] = word_freq.get(word, 0) + 1
+            cleaned = re.sub(r"[^a-z]", "", word)
+            if len(cleaned) > 4 and cleaned in english_words:
+                word_freq[cleaned] = word_freq.get(cleaned, 0) + 1
 
         # Top 5 most frequent words as topics
         sorted_words = sorted(

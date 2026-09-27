@@ -1,39 +1,38 @@
-"""Unified prompt management system"""
+"""Unified prompt management system, backed by Langfuse Prompt Management"""
 
-from typing import Dict, Optional
-from string import Template
+import re
+from typing import Any, Dict, List, Optional
 
+from langfuse import Langfuse
+
+from src.config import LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
 from src.shared.logger import get_logger
 
 logger = get_logger(__name__)
 
+_VARIABLE_PATTERN = re.compile(r"\{\{(.*?)\}\}")
 
-class PromptManager:
-    """Manages prompt templates and formatting"""
-
-    def __init__(self):
-        self.templates: Dict[str, str] = {}
-        self._load_default_prompts()
-
-    def _load_default_prompts(self) -> None:
-        """Load default prompt templates"""
-        self.templates = {
-            "context_analysis": """Analyze the following conversation context and provide insights about:
+# Local defaults, used as the Langfuse "fallback" and to seed Langfuse on first use.
+# Variables use Langfuse's double-curly-brace syntax, e.g. {{conversation}}.
+_DEFAULT_PROMPTS: Dict[str, str] = {
+    "context_analysis": """Analyze the following conversation context and provide insights about:
 1. Structural patterns (turn sequence, speaker patterns)
 2. Semantic content (main topics, key phrases, sentiment)
 3. Complexity indicators (number of topics, semantic diversity)
 4. Intent analysis (user goals, assistant objectives)
 
 Conversation:
-$conversation
+{{conversation}}
+
+Rule: regardless of the conversation's original language, write the extracted topics in English.
 
 Provide a structured analysis.""",
-            "rule_generation": """Based on the context analysis, generate evaluation rules for assessing responses:
+    "rule_generation": """Based on the context analysis, generate evaluation rules for assessing responses:
 
 Context Analysis:
-$context_analysis
+{{context_analysis}}
 
-Task: $task
+Task: {{task}}
 
 Generate rules for:
 1. Task-specific classification criteria
@@ -42,16 +41,16 @@ Generate rules for:
 4. Minimum heuristic checks
 
 Provide a JSON-formatted set of rules.""",
-            "jury_evaluation": """Evaluate the provided response using the following rules and context:
+    "jury_evaluation": """Evaluate the provided response using the following rules and context:
 
 Rules:
-$rules
+{{rules}}
 
 Response to Evaluate:
-$response
+{{response}}
 
 Context:
-$context
+{{context}}
 
 Provide your evaluation with:
 1. Score (0-10)
@@ -59,48 +58,145 @@ Provide your evaluation with:
 3. Reasoning
 4. Strengths
 5. Weaknesses""",
-            "metrics_aggregation": """Aggregate the following jury evaluations into a final assessment:
+    "metrics_aggregation": """Aggregate the following jury evaluations into a final assessment:
 
 Evaluations:
-$evaluations
+{{evaluations}}
 
 Generate:
 1. Weighted average score
 2. Confidence estimation
 3. Final recommendation
 4. Areas of agreement/disagreement""",
-        }
-        logger.debug(f"Loaded {len(self.templates)} default prompt templates")
+    "llm_evaluation": """Evaluate the following response against the given criteria.
+
+Response to Evaluate:
+{{response}}
+
+Evaluation Criteria:
+{{criteria_text}}
+
+Context:
+- Task Type: {{task_type}}
+- Complexity: {{complexity_score}}
+
+Provide your evaluation in the following format:
+1. Overall Score (0-10):
+2. Confidence (0-1):
+3. Strengths:
+4. Weaknesses:
+5. Reasoning:""",
+}
+
+
+def _compile_locally(template: str, variables: Dict[str, Any]) -> str:
+    """Substitute {{variable}} placeholders without calling out to Langfuse"""
+
+    def replace(match: "re.Match[str]") -> str:
+        key = match.group(1).strip()
+        if key not in variables:
+            return match.group(0)
+        value = variables[key]
+        return "" if value is None else str(value)
+
+    return _VARIABLE_PATTERN.sub(replace, template)
+
+
+class PromptManager:
+    """Manages prompt templates via Langfuse Prompt Management, with local fallback defaults"""
+
+    def __init__(self):
+        self._local_defaults: Dict[str, str] = dict(_DEFAULT_PROMPTS)
+        self._langfuse: Optional[Langfuse] = None
+
+        if LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY:
+            try:
+                self._langfuse = Langfuse(
+                    public_key=LANGFUSE_PUBLIC_KEY,
+                    secret_key=LANGFUSE_SECRET_KEY,
+                    host=LANGFUSE_HOST,
+                )
+            except Exception as e:
+                logger.warning(f"Could not initialize Langfuse client: {e}")
+        else:
+            logger.warning(
+                "Langfuse credentials not configured; prompts will use local defaults only"
+            )
+
+    def _get_prompt_client(self, name: str) -> Optional[Any]:
+        """Fetch a prompt client for `name` from Langfuse, seeding it there on first use"""
+        if self._langfuse is None:
+            return None
+
+        fallback = self._local_defaults.get(name)
+        try:
+            prompt = self._langfuse.get_prompt(
+                name,
+                fallback=fallback,
+                max_retries=1,
+                fetch_timeout_seconds=3,
+            )
+        except Exception as e:
+            logger.warning(f"Could not fetch prompt '{name}' from Langfuse: {e}")
+            return None
+
+        if prompt.is_fallback and fallback is not None:
+            # Prompt doesn't exist in Langfuse yet: publish it so it becomes
+            # visible and editable there going forward.
+            try:
+                self._langfuse.create_prompt(
+                    name=name, prompt=fallback, labels=["production"], type="text"
+                )
+                logger.debug(f"Seeded prompt '{name}' in Langfuse")
+            except Exception as e:
+                logger.warning(f"Could not seed prompt '{name}' in Langfuse: {e}")
+
+        return prompt
 
     def get_template(self, template_name: str) -> Optional[str]:
-        """Get a prompt template by name"""
-        template = self.templates.get(template_name)
+        """Get the raw prompt text for a template, preferring the Langfuse-managed version"""
+        prompt = self._get_prompt_client(template_name)
+        if prompt is not None:
+            return prompt.prompt
+
+        template = self._local_defaults.get(template_name)
         if not template:
             logger.warning(f"Template '{template_name}' not found")
         return template
 
     def register_template(self, name: str, template: str) -> None:
-        """Register a new prompt template"""
-        self.templates[name] = template
+        """Register a new prompt template locally and publish it to Langfuse"""
+        self._local_defaults[name] = template
+        if self._langfuse is not None:
+            try:
+                self._langfuse.create_prompt(
+                    name=name, prompt=template, labels=["production"], type="text"
+                )
+            except Exception as e:
+                logger.warning(f"Could not publish prompt '{name}' to Langfuse: {e}")
         logger.debug(f"Registered template: {name}")
 
-    def format_prompt(
-        self, template_name: str, **variables: str
-    ) -> Optional[str]:
+    def format_prompt(self, template_name: str, **variables: Any) -> Optional[str]:
         """Format a prompt template with provided variables"""
-        template = self.get_template(template_name)
+        prompt = self._get_prompt_client(template_name)
+        if prompt is not None:
+            try:
+                formatted = prompt.compile(**variables)
+                logger.debug(f"Formatted prompt: {template_name}")
+                return formatted
+            except Exception as e:
+                logger.error(f"Failed to format prompt '{template_name}': {e}")
+                return None
+
+        template = self._local_defaults.get(template_name)
         if not template:
+            logger.warning(f"Template '{template_name}' not found")
             return None
 
-        try:
-            prompt = Template(template)
-            formatted = prompt.substitute(variables)
-            logger.debug(f"Formatted prompt: {template_name}")
-            return formatted
-        except KeyError as e:
-            logger.error(f"Missing variable for template '{template_name}': {e}")
-            return None
+        formatted = _compile_locally(template, variables)
+        logger.debug(f"Formatted prompt: {template_name}")
+        return formatted
 
-    def list_templates(self) -> list:
-        """List all available templates"""
-        return list(self.templates.keys())
+    def list_templates(self) -> List[str]:
+        """List all available (locally known) templates"""
+        return list(self._local_defaults.keys())

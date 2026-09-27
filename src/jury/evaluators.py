@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 
 from src.shared.logger import get_logger
 from src.shared.llm.client import LLMClient
+from src.shared.llm.prompts import PromptManager
 
 logger = get_logger(__name__)
 
@@ -33,6 +34,7 @@ class LLMEvaluator(Evaluator):
 
     def __init__(self, evaluator_type: str = "general"):
         self.llm_client = LLMClient()
+        self.prompt_manager = PromptManager()
         self.evaluator_type = evaluator_type
 
     def evaluate(
@@ -79,26 +81,13 @@ class LLMEvaluator(Evaluator):
             ]
         )
 
-        prompt = f"""Evaluate the following response against the given criteria.
-
-Response to Evaluate:
-{response}
-
-Evaluation Criteria:
-{criteria_text}
-
-Context:
-- Task Type: {context.get('task_type', 'general')}
-- Complexity: {context.get('complexity_score', 'unknown')}
-
-Provide your evaluation in the following format:
-1. Overall Score (0-10):
-2. Confidence (0-1):
-3. Strengths:
-4. Weaknesses:
-5. Reasoning:
-"""
-        return prompt
+        return self.prompt_manager.format_prompt(
+            "llm_evaluation",
+            response=response,
+            criteria_text=criteria_text,
+            task_type=context.get("task_type", "general"),
+            complexity_score=context.get("complexity_score", "unknown"),
+        )
 
     def _parse_evaluation(self, eval_text: str) -> Dict[str, Any]:
         """Parse LLM evaluation output"""

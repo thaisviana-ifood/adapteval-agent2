@@ -1,6 +1,7 @@
 """Structural analysis of conversation patterns"""
 
 from typing import Dict, Any, List
+from itertools import groupby
 import re
 
 from src.shared.logger import get_logger
@@ -41,6 +42,10 @@ class StructuralAnalyzer:
                 speaker_pattern.append("assistant")
 
         turn_count = user_turns + assistant_turns
+
+        # Collapse consecutive repeats so the pattern reflects turn-taking,
+        # not how many lines each speaker's turn happened to span
+        speaker_pattern = [key for key, _ in groupby(speaker_pattern)]
 
         # Calculate turn lengths
         user_turn_lengths = self._extract_turn_lengths(
