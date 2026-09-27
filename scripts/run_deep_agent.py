@@ -1,8 +1,9 @@
-"""Run the thesis evaluation deep agent over a multi-turn conversation
+"""Run the thesis evaluation deep agent over a dataset of multi-turn conversations
 
-By default this calls the LangGraph pipeline directly (src.agent.run_pipeline),
-which is the reliable, schema-guaranteed entry point. Pass --use-agent to
-instead go through the deepagents conversational front-end.
+By default this calls the LangGraph pipeline directly (src.agent.run_pipeline)
+for every item in the dataset, which is the reliable, schema-guaranteed entry
+point the deep agent's own tool wraps. Pass --use-agent to instead go through
+the deepagents conversational front-end for each item.
 """
 
 import argparse
@@ -20,6 +21,7 @@ from src.agent import evaluate_conversation, run_pipeline  # noqa: E402
 
 logger = get_logger(__name__)
 
+DEFAULT_DATASET = RAW_DATA_DIR / "diana-agent-csat.json"
 DEFAULT_OUTPUT = OUTPUT_DATA_DIR / "deep_agent_evaluation.json"
 
 EXAMPLE_CONVERSATION = (
@@ -34,19 +36,67 @@ EXAMPLE_CONVERSATION = (
 )
 
 
-def load_conversation(dataset_path: Path, item_id: str = None) -> str:
-    """Load a single conversation from a dataset export (same format as
-    run_context_analysis.py), optionally selecting a specific item id"""
-    with open(dataset_path, "r", encoding="utf-8") as f:
-        dataset: List[Dict[str, Any]] = json.load(f)
+def load_dataset(path: Path) -> List[Dict[str, Any]]:
+    """Load a dataset export (list of items with input.query.content messages)"""
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    if item_id:
-        for item in dataset:
-            if str(item.get("id")) == item_id:
-                return build_conversation_text(item)
-        raise ValueError(f"No item with id '{item_id}' in {dataset_path}")
 
-    return build_conversation_text(dataset[0])
+def _langfuse_context(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive Langfuse user_id/tags/metadata for a dataset item
+
+    user_id is the tenant/restaurant being evaluated (metadata.tenant_hash
+    in Langfuse dataset exports), so all evaluations of the same tenant
+    across runs group under the same Langfuse user.
+    """
+    item_metadata = item.get("metadata") or {}
+    dataset_name = item.get("datasetName")
+
+    return {
+        "user_id": item_metadata.get("tenant_hash"),
+        "tags": [dataset_name] if dataset_name else None,
+        "metadata": {
+            "dataset_item_id": item.get("id"),
+            "source_trace_id": item.get("sourceTraceId"),
+        },
+    }
+
+
+def evaluate_dataset(
+    dataset: List[Dict[str, Any]],
+    output_path: Path,
+    use_agent: bool = False,
+) -> List[Dict[str, Any]]:
+    """Run every item in the dataset through the pipeline, writing results
+    incrementally to output_path so progress survives an interruption"""
+    results: List[Dict[str, Any]] = []
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    for idx, item in enumerate(dataset, start=1):
+        item_id = item.get("id")
+        logger.info(f"[{idx}/{len(dataset)}] Evaluating item {item_id}")
+
+        conversation = item.get("_conversation_override") or build_conversation_text(item)
+        langfuse_context = _langfuse_context(item)
+        try:
+            if use_agent:
+                evaluation = evaluate_conversation(
+                    conversation, thread_id=item_id, **langfuse_context
+                )
+            else:
+                evaluation = run_pipeline(
+                    conversation, evaluation_id=item_id, **langfuse_context
+                )
+        except Exception as e:
+            logger.error(f"Item {item_id} failed: {e}")
+            evaluation = {"error": str(e)}
+
+        results.append({"id": item_id, **evaluation})
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+
+    return results
 
 
 def main() -> None:
@@ -54,16 +104,20 @@ def main() -> None:
         description=(
             "Run the thesis evaluation pipeline (Análise de Contexto -> "
             "Gerador de Regras -> LLM as a Jury -> Agregação das métricas) "
-            "over a multi-turn conversation"
+            "over every conversation in a dataset"
         )
     )
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=None,
-        help=f"Dataset JSON file to load a conversation from (default: {RAW_DATA_DIR}/diana-agent-csat.json)",
+        default=DEFAULT_DATASET,
+        help=f"Dataset JSON file to evaluate (default: {DEFAULT_DATASET})",
     )
-    parser.add_argument("--item-id", default=None, help="Specific dataset item id to evaluate")
+    parser.add_argument(
+        "--item-id",
+        default=None,
+        help="Evaluate only this single dataset item id instead of the whole file",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -77,28 +131,25 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.dataset:
-        conversation = load_conversation(args.dataset, args.item_id)
+    if args.dataset.exists():
+        dataset = load_dataset(args.dataset)
+        if args.item_id:
+            dataset = [item for item in dataset if str(item.get("id")) == args.item_id]
+            if not dataset:
+                raise ValueError(f"No item with id '{args.item_id}' in {args.dataset}")
     else:
-        dataset_path = RAW_DATA_DIR / "diana-agent-csat.json"
-        conversation = (
-            load_conversation(dataset_path, args.item_id)
-            if dataset_path.exists()
-            else EXAMPLE_CONVERSATION
-        )
+        logger.warning(f"{args.dataset} not found; using a single built-in example conversation")
+        dataset = [{"id": "example", "_conversation_override": EXAMPLE_CONVERSATION}]
 
-    logger.info("Running thesis evaluation %s", "via deep agent" if args.use_agent else "directly")
-    if args.use_agent:
-        result = evaluate_conversation(conversation)
-    else:
-        result = run_pipeline(conversation)
+    logger.info(
+        "Running thesis evaluation over %d item(s) %s",
+        len(dataset),
+        "via deep agent" if args.use_agent else "directly",
+    )
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
+    results = evaluate_dataset(dataset, args.output, use_agent=args.use_agent)
 
-    logger.info(f"Wrote evaluation result to {args.output}")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    logger.info(f"Wrote {len(results)} evaluation result(s) to {args.output}")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 """Evaluator implementations for jury assessment"""
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
 
+from src.config import JURY_PROVIDERS
 from src.shared.logger import get_logger
 from src.shared.llm.client import LLMClient
 from src.shared.llm.prompts import PromptManager
@@ -30,10 +31,33 @@ class Evaluator(ABC):
 
 
 class LLMEvaluator(Evaluator):
-    """LLM-based evaluator using Claude"""
+    """LLM-based evaluator, bound to a single provider's model
 
-    def __init__(self, evaluator_type: str = "general"):
-        self.llm_client = LLMClient()
+    The provider (model, api_key, base_url) is passed in by whoever
+    orchestrates the jury -- see EvaluatorPanel -- instead of being
+    hardcoded here, so each juror can be wired to a different LLM vendor.
+    """
+
+    def __init__(
+        self,
+        evaluator_type: str = "general",
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        # `is not None` (not plain truthiness): an explicitly configured
+        # empty string -- e.g. an unset TYPESAFE_BASE_URL -- must still be
+        # passed through, so the client fails loudly instead of silently
+        # falling back to LLMClient's DeepSeek-flavored defaults.
+        client_kwargs: Dict[str, str] = {}
+        if model is not None:
+            client_kwargs["model"] = model
+        if api_key is not None:
+            client_kwargs["api_key"] = api_key
+        if base_url is not None:
+            client_kwargs["base_url"] = base_url
+
+        self.llm_client = LLMClient(**client_kwargs)
         self.prompt_manager = PromptManager()
         self.evaluator_type = evaluator_type
 
@@ -245,19 +269,29 @@ class RulesBasedEvaluator(Evaluator):
 
 
 class EvaluatorPanel:
-    """Panel of multiple evaluators"""
+    """Orchestrates the jury: one LLM juror per configured provider
 
-    def __init__(self, evaluator_count: int = 3):
+    Each entry in `providers` supplies the (name, model, api_key, base_url)
+    for one juror; they're passed straight through as parameters to
+    LLMEvaluator, so adding/swapping a provider is a config change, not a
+    code change. Defaults to JURY_PROVIDERS (DeepSeek, OpenAI, Typesafe --
+    see src/config.py), matching MIN_EVALUATORS=3.
+    """
+
+    def __init__(self, providers: Optional[List[Dict[str, str]]] = None):
         self.evaluators: List[Evaluator] = []
-        self._init_evaluators(evaluator_count)
+        self._init_evaluators(providers or JURY_PROVIDERS)
 
-    def _init_evaluators(self, count: int) -> None:
-        """Initialize evaluators"""
-        self.evaluators.append(RulesBasedEvaluator())
-
-        for i in range(count - 1):
+    def _init_evaluators(self, providers: List[Dict[str, str]]) -> None:
+        """Initialize one LLM juror per provider"""
+        for provider in providers:
             self.evaluators.append(
-                LLMEvaluator(evaluator_type=f"type_{i}")
+                LLMEvaluator(
+                    evaluator_type=provider["name"],
+                    model=provider.get("model"),
+                    api_key=provider.get("api_key"),
+                    base_url=provider.get("base_url"),
+                )
             )
 
     def evaluate(

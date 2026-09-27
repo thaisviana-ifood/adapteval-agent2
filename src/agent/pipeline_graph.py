@@ -3,15 +3,17 @@ Regras -> LLM as a Jury -> Agregação das métricas, with per-node state
 persisted by a LangGraph checkpointer"""
 
 import uuid
-from contextlib import ExitStack
-from typing import Any, Dict, Optional
+from contextlib import ExitStack, nullcontext
+from typing import Any, Dict, List, Optional
 
+from langfuse import propagate_attributes
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from src.config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER, USE_POSTGRES_MEMORY
+from src.shared.llm.langfuse_handler import get_langfuse_callback_handler
 from src.shared.logger import get_logger
 from src.agent.nodes import PipelineNodes
 from src.agent.state import PipelineState
@@ -93,14 +95,24 @@ def get_pipeline_graph() -> CompiledStateGraph:
 
 
 def run_pipeline(
-    conversation: str, evaluation_id: Optional[str] = None
+    conversation: str,
+    evaluation_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run the full thesis pipeline over a multi-turn conversation
 
     Args:
         conversation: Multi-turn conversation history ("User: ...\\n\\nAssistant: ...")
-        evaluation_id: Optional id; also used as the LangGraph thread_id so
-            the run's per-node state can be inspected/resumed later.
+        evaluation_id: Optional id; also used as the LangGraph thread_id and
+            as the Langfuse session_id, so the run's per-node state and its
+            Langfuse trace can both be inspected/resumed later.
+        user_id: Optional end-user/tenant identifier attached to the
+            Langfuse trace (see
+            https://langfuse.com/integrations/frameworks/langgraph).
+        tags: Optional Langfuse tags for the trace.
+        metadata: Optional extra Langfuse trace metadata.
 
     Returns:
         The final structured evaluation output (avaliação, nota de
@@ -109,10 +121,27 @@ def run_pipeline(
     evaluation_id = evaluation_id or f"eval-{uuid.uuid4().hex[:12]}"
     graph = get_pipeline_graph()
 
-    config = {"configurable": {"thread_id": evaluation_id}}
-    final_state = graph.invoke(
-        {"conversation": conversation, "evaluation_id": evaluation_id},
-        config=config,
-    )
+    config: Dict[str, Any] = {
+        "configurable": {"thread_id": evaluation_id},
+        "run_name": "thesis-evaluation-pipeline",
+    }
+
+    handler = get_langfuse_callback_handler()
+    trace_context = nullcontext()
+    if handler is not None:
+        config["callbacks"] = [handler]
+        trace_context = propagate_attributes(
+            trace_name="thesis-evaluation-pipeline",
+            session_id=evaluation_id,
+            user_id=user_id,
+            tags=tags,
+            metadata=metadata,
+        )
+
+    with trace_context:
+        final_state = graph.invoke(
+            {"conversation": conversation, "evaluation_id": evaluation_id},
+            config=config,
+        )
 
     return final_state["evaluation_output"]

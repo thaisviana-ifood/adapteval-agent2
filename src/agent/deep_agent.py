@@ -14,9 +14,11 @@ authoritative result -- the agent is only asked to relay it.
 """
 
 import json
-from typing import Any, Dict, Optional
+from contextlib import nullcontext
+from typing import Any, Dict, List, Optional
 
 from deepagents import create_deep_agent
+from langfuse import propagate_attributes
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -28,6 +30,7 @@ from src.config import (
     LLM_TEMPERATURE,
     LLM_TIMEOUT,
 )
+from src.shared.llm.langfuse_handler import get_langfuse_callback_handler
 from src.shared.logger import get_logger
 from src.agent.pipeline_graph import get_checkpointer, run_pipeline
 
@@ -103,7 +106,11 @@ def get_evaluation_deep_agent():
 
 
 def evaluate_conversation(
-    conversation: str, thread_id: Optional[str] = None
+    conversation: str,
+    thread_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run the deep agent over a multi-turn conversation and parse its
     (already-JSON) final answer back into a dict.
@@ -112,14 +119,39 @@ def evaluate_conversation(
     `src.agent.pipeline_graph.run_pipeline` directly; this helper goes
     through the conversational agent and is mainly useful to exercise/demo
     the deepagents front-end end-to-end.
+
+    thread_id doubles as the LangGraph checkpointer thread and the Langfuse
+    session_id; user_id/tags/metadata are attached to the Langfuse trace
+    (see https://langfuse.com/integrations/frameworks/langgraph). Both
+    propagate down into the nested `run_thesis_pipeline` tool call's own
+    pipeline_graph.run_pipeline() trace, since it runs synchronously inside
+    the same propagate_attributes context.
     """
     agent = get_evaluation_deep_agent()
     thread_id = thread_id or "deep-agent-eval"
 
-    result = agent.invoke(
-        {"messages": [HumanMessage(content=conversation)]},
-        config={"configurable": {"thread_id": thread_id}},
-    )
+    config: Dict[str, Any] = {
+        "configurable": {"thread_id": thread_id},
+        "run_name": "thesis-evaluation-deep-agent",
+    }
+
+    handler = get_langfuse_callback_handler()
+    trace_context = nullcontext()
+    if handler is not None:
+        config["callbacks"] = [handler]
+        trace_context = propagate_attributes(
+            trace_name="thesis-evaluation-deep-agent",
+            session_id=thread_id,
+            user_id=user_id,
+            tags=tags,
+            metadata=metadata,
+        )
+
+    with trace_context:
+        result = agent.invoke(
+            {"messages": [HumanMessage(content=conversation)]},
+            config=config,
+        )
 
     final_message = result["messages"][-1]
     content = final_message.content

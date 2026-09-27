@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -20,12 +20,38 @@ for directory in [RAW_DATA_DIR, ANNOTATED_DATA_DIR, OUTPUT_DATA_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
 # LLM Configuration (DeepSeek, OpenAI-compatible API)
+# This is the model used by the deep agent's own conversational front-end
+# (src/agent/deep_agent.py), not by the jury -- see JURY_PROVIDERS below.
 LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek-v4-pro")
 LLM_API_KEY: str = os.getenv("DEEP_SEEK_API_KEY", "")
 LLM_BASE_URL: str = os.getenv("DEEP_SEEK_BASE_URL", "https://api.deepseek.com")
 LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "60"))
+
+# Jury Configuration -- one LLM provider per juror, so the panel is never
+# just one vendor's model grading itself. Each entry is passed as the model
+# parameters for one juror in src.jury.evaluators.EvaluatorPanel.
+JURY_PROVIDERS: List[Dict[str, str]] = [
+    {
+        "name": "deepseek",
+        "model": os.getenv("LLM_MODEL_DEEP_SEEK", "deepseek-v4-pro"),
+        "api_key": os.getenv("DEEP_SEEK_API_KEY", ""),
+        "base_url": os.getenv("DEEP_SEEK_BASE_URL", "https://api.deepseek.com"),
+    },
+    {
+        "name": "openai",
+        "model": os.getenv("LLM_MODEL_OPEN_AI", "gpt-4o"),
+        "api_key": os.getenv("OPEN_AI_API_KEY", ""),
+        "base_url": os.getenv("OPEN_AI_BASE_URL", "https://api.openai.com/v1"),
+    },
+    {
+        "name": "typesafe",
+        "model": os.getenv("LLM_MODEL_TYPESAFE", ""),
+        "api_key": os.getenv("TYPESAFE_API_KEY", ""),
+        "base_url": os.getenv("TYPESAFE_BASE_URL", ""),
+    },
+]
 
 # Database Configuration
 DB_HOST: str = os.getenv("DB_HOST", "localhost")
