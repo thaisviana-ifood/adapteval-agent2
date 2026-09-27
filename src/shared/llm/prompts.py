@@ -12,34 +12,62 @@ _VARIABLE_PATTERN = re.compile(r"\{\{(.*?)\}\}")
 
 # Local defaults, used as the Langfuse "fallback" and to seed Langfuse on first use.
 # Variables use Langfuse's double-curly-brace syntax, e.g. {{conversation}}.
+#
+# v2: every template below states its output contract explicitly (a fixed
+# JSON schema or a fixed labeled-line format) instead of a numbered list of
+# topics to cover, and tells the model to check criteria/rules individually
+# before scoring rather than judging holistically. This is meant to reduce
+# parsing failures and partial-credit drift, without changing variable names
+# or output shapes that downstream code (regexes, json.loads) depends on.
 _DEFAULT_PROMPTS: Dict[str, str] = {
-    "context_analysis": """Analyze the following conversation context and provide insights about:
-1. Structural patterns (turn sequence, speaker patterns)
-2. Semantic content (main topics, key phrases, sentiment)
-3. Complexity indicators (number of topics, semantic diversity)
-4. Intent analysis (user goals, assistant objectives)
+    "context_analysis": """You are analyzing a conversation between a user and an AI assistant, to support downstream evaluation of the assistant's response.
 
 Conversation:
 {{conversation}}
 
-Rule: regardless of the conversation's original language, write the extracted topics in English.
+Analyze the conversation along four dimensions and return your findings as a single JSON object with exactly these keys:
 
-Provide a structured analysis.""",
-    "rule_generation": """Based on the context analysis, generate evaluation rules for assessing responses:
+1. "structural": turn-taking patterns.
+   - "total_turns" (int), "user_turns" (int), "assistant_turns" (int)
+   - "speaker_pattern" (list of "user"/"assistant", collapsing consecutive repeats)
+   - "turn_distribution_ratio" (float: user_turns / assistant_turns, 0 if assistant_turns is 0)
+
+2. "semantic": what the conversation is about.
+   - "topics" (list of short strings)
+   - "key_phrases" (list of short strings)
+   - "sentiment_score" (float, -1 negative to 1 positive)
+
+3. "complexity": how demanding the conversation is.
+   - "complexity_score" (float, 0-1)
+   - "technical_terms_count" (int)
+   - "question_count" (int)
+
+4. "intent": what each party is trying to achieve.
+   - "user_intents" (list of short verb-based labels, e.g. "fix", "explain", "create")
+   - "assistant_objectives" (list of short strings)
+   - "primary_intent" (string: the single most important user intent, or "unknown")
+
+Rules:
+- Base every field only on what is present in the conversation; do not invent details.
+- Regardless of the conversation's original language, write "topics", "key_phrases", "user_intents" and "assistant_objectives" in English.
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
+    "rule_generation": """Based on the context analysis below, generate evaluation rules for assessing an AI assistant's response to this task: {{task}}
 
 Context Analysis:
 {{context_analysis}}
 
-Task: {{task}}
+Return a single JSON object with exactly these keys:
+- "classification_criteria": short strings describing what distinguishes this task type from others.
+- "success_conditions": concrete, checkable conditions a good response must satisfy.
+- "failure_conditions": concrete, checkable conditions that would make a response unacceptable.
+- "context_aware_criteria": a list of {"name": str, "description": str} objects, each a strict boolean (yes/no) check specific to this context -- not a generic criterion like "is relevant" that a fixed criterion already covers elsewhere.
+- "heuristic_checks": short strings naming cheap, non-LLM checks worth running (e.g. "response is non-empty", "no unresolved placeholders").
 
-Generate rules for:
-1. Task-specific classification criteria
-2. Success and failure conditions
-3. Context-aware evaluation criteria
-4. Minimum heuristic checks
-
-Provide a JSON-formatted set of rules.""",
-    "jury_evaluation": """Evaluate the provided response using the following rules and context:
+Rules:
+- Every "context_aware_criteria" description must be phrasable as a yes/no question.
+- Do not repeat the same idea across multiple lists.
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
+    "jury_evaluation": """You are an impartial juror evaluating an AI assistant's response against a fixed set of rules.
 
 Rules:
 {{rules}}
@@ -50,22 +78,32 @@ Response to Evaluate:
 Context:
 {{context}}
 
-Provide your evaluation with:
-1. Score (0-10)
-2. Confidence level (0-1)
-3. Reasoning
-4. Strengths
-5. Weaknesses""",
-    "metrics_aggregation": """Aggregate the following jury evaluations into a final assessment:
+Check the response against every rule above before scoring. Do not give credit for a rule that is not clearly satisfied.
+
+Respond in EXACTLY this format, with no extra commentary before or after:
+
+Score: <single number from 0 to 10, no range, no fraction>
+Confidence: <single number from 0 to 1>
+Strengths:
+- <bullet, tied to a specific rule>
+Weaknesses:
+- <bullet, tied to a specific rule>
+Reasoning: <2-4 sentences justifying the score by referencing which rules passed or failed>""",
+    "metrics_aggregation": """Aggregate the jury evaluations below into a single final assessment.
 
 Evaluations:
 {{evaluations}}
 
-Generate:
-1. Weighted average score
-2. Confidence estimation
-3. Final recommendation
-4. Areas of agreement/disagreement""",
+Return a single JSON object with exactly these keys:
+- "weighted_average_score": float, 0-10, weighting each evaluation by its own confidence rather than a plain average.
+- "confidence": float, 0-1 -- your confidence in the aggregated score (lower when evaluators disagree).
+- "recommendation": one of "approve", "approve_with_notes", "review_required", "reject".
+- "agreement_areas": short strings naming points where the evaluations agree.
+- "disagreement_areas": short strings naming points where the evaluations diverge, and why.
+
+Rules:
+- If evaluations disagree by more than 3 points, "recommendation" must be "review_required" or "reject".
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
     "dynamic_criteria_generation": """You are designing evaluation criteria for an AI response.
 
 Context Analysis:
@@ -77,34 +115,43 @@ Objectives:
 Existing Criteria (do not repeat or duplicate these):
 {{existing_criteria}}
 
-Propose additional evaluation criteria that are specific to this context and objectives, and that complement (do not overlap with) the existing criteria above.
+Propose additional evaluation criteria that are specific to this context and objectives, and that complement (do not overlap with) the existing criteria above. Favor criteria that catch failure modes particular to this task -- not generic qualities like "helpfulness" or "clarity" that a fixed criterion already covers elsewhere.
 
 Rules:
-- Each criterion MUST be a strict boolean (yes/no) check.
+- Each criterion MUST be a strict boolean (yes/no) check with a single unambiguous answer -- no "partially" or "somewhat".
 - Phrase each "description" as a question that can only be answered True or False.
 - Propose at most 3 criteria. Return fewer, or an empty array, if nothing meaningful is missing.
-- Do not restate or rephrase an existing criterion.
+- Do not restate, rephrase, or narrow an existing criterion.
+- "name" must be 1-4 words, in Title Case.
+
+Example of a good criterion, for a task that asks the assistant to cite sources:
+{"name": "Citations Present", "description": "Does the response include at least one citation for its factual claims?"}
 
 Return ONLY a JSON array, with no surrounding text, in this exact form:
 [{"name": "Short Name", "description": "Does the response ...?"}]""",
-    "llm_evaluation": """Evaluate the following response against the given criteria.
+    "llm_evaluation": """You are an impartial evaluator scoring an AI assistant's response.
+
+Task Context:
+- Task Type: {{task_type}}
+- Complexity: {{complexity_score}}
 
 Response to Evaluate:
 {{response}}
 
-Evaluation Criteria:
+Evaluation Criteria (each is a strict yes/no check):
 {{criteria_text}}
 
-Context:
-- Task Type: {{task_type}}
-- Complexity: {{complexity_score}}
+Check the response against every criterion above before scoring. A response that fails a criterion cannot receive full marks; do not give partial credit for a failed criterion.
 
-Provide your evaluation in the following format:
-1. Overall Score (0-10):
-2. Confidence (0-1):
-3. Strengths:
-4. Weaknesses:
-5. Reasoning:""",
+Respond in EXACTLY this format, with no extra commentary before or after:
+
+Score: <single number from 0 to 10, no range, no fraction>
+Confidence: <single number from 0 to 1>
+Strengths:
+- <bullet, tied to a specific criterion>
+Weaknesses:
+- <bullet, tied to a specific criterion>
+Reasoning: <2-4 sentences explaining the score, referencing which criteria passed or failed>""",
 }
 
 
@@ -119,6 +166,14 @@ def _compile_locally(template: str, variables: Dict[str, Any]) -> str:
         return "" if value is None else str(value)
 
     return _VARIABLE_PATTERN.sub(replace, template)
+
+
+def get_default_prompts() -> Dict[str, str]:
+    """Return a copy of the local default prompt templates (the current
+    "v2" text), keyed by template name. Used to push these templates to
+    Langfuse as new prompt versions -- see scripts/push_prompts_to_langfuse.py.
+    """
+    return dict(_DEFAULT_PROMPTS)
 
 
 class PromptManager:
