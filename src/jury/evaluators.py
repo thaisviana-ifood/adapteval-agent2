@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from src.config import JURY_PROVIDERS
 from src.shared.logger import get_logger
 from src.shared.llm.client import LLMClient
+from src.shared.llm.langfuse_client import get_langfuse_client
 from src.shared.llm.prompts import PromptManager
 from src.shared.llm.typesafe_client import TypesafeClient
 
@@ -183,6 +184,11 @@ class TypesafeEvaluator(Evaluator):
         self.client = TypesafeClient(
             model=model, api_key=api_key, base_url=base_url, timeout=timeout
         )
+        # TypesafeClient is plain httpx, not the langfuse.openai wrapper
+        # LLMClient uses, so calls through it aren't auto-traced -- trace
+        # them manually here to keep this juror visible in Langfuse
+        # alongside the DeepSeek/OpenAI jurors.
+        self._langfuse = get_langfuse_client()
 
     def evaluate(
         self,
@@ -201,17 +207,33 @@ class TypesafeEvaluator(Evaluator):
             f"Task type: {context.get('task_type', 'general')}; "
             f"Complexity: {context.get('complexity_score', 'unknown')}"
         )
+        questions = {
+            "overall_quality": {
+                "type": "score",
+                "instructions": instructions,
+                "criteria": self._SCALE_LABELS,
+            }
+        }
 
-        result = self.client.ask(
-            state=response,
-            questions={
-                "overall_quality": {
-                    "type": "score",
-                    "instructions": instructions,
-                    "criteria": self._SCALE_LABELS,
-                }
-            },
-        )
+        if self._langfuse is not None:
+            with self._langfuse.start_as_current_observation(
+                as_type="generation",
+                name=f"jury.{self.get_name()}",
+                model=self.client.model,
+                input={"state": response, "questions": questions},
+                metadata={
+                    "evaluator_type": "typesafe",
+                    "task_type": context.get("task_type", "general"),
+                },
+            ) as generation:
+                result = self.client.ask(state=response, questions=questions)
+                generation.update(
+                    output=result.get("answers"),
+                    usage_details=result.get("usage"),
+                )
+        else:
+            result = self.client.ask(state=response, questions=questions)
+
         answer = result.get("answers", {}).get("overall_quality", {})
         raw_score = float(answer.get("score", 4.5))  # 0-9
         legend = answer.get("legend", {})
