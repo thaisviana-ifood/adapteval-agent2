@@ -66,6 +66,27 @@ Generate:
 2. Confidence estimation
 3. Final recommendation
 4. Areas of agreement/disagreement""",
+    "dynamic_criteria_generation": """You are designing evaluation criteria for an AI response.
+
+Context Analysis:
+{{context_summary}}
+
+Objectives:
+{{objectives_summary}}
+
+Existing Criteria (do not repeat or duplicate these):
+{{existing_criteria}}
+
+Propose additional evaluation criteria that are specific to this context and objectives, and that complement (do not overlap with) the existing criteria above.
+
+Rules:
+- Each criterion MUST be a strict boolean (yes/no) check.
+- Phrase each "description" as a question that can only be answered True or False.
+- Propose at most 3 criteria. Return fewer, or an empty array, if nothing meaningful is missing.
+- Do not restate or rephrase an existing criterion.
+
+Return ONLY a JSON array, with no surrounding text, in this exact form:
+[{"name": "Short Name", "description": "Does the response ...?"}]""",
     "llm_evaluation": """Evaluate the following response against the given criteria.
 
 Response to Evaluate:
