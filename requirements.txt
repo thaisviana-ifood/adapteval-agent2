@@ -4,6 +4,15 @@ openai>=1.30.0
 # Prompt management and observability
 langfuse>=4.0.0
 
+# Deep agent pipeline orchestration
+deepagents>=0.7.0
+langgraph>=1.0.0
+langchain-openai>=1.0.0
+langgraph-checkpoint-postgres>=3.0.0
+# Pinned: the SDK's default resolved version has no prebuilt wheel for some
+# platforms (requires a Rust toolchain to build from source).
+cryptography==43.0.3
+
 # Data processing
 numpy>=1.24.0
 pandas>=2.0.0

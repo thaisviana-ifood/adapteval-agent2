@@ -3,9 +3,7 @@
 import re
 from typing import Any, Dict, List, Optional
 
-from langfuse import Langfuse
-
-from src.config import LANGFUSE_HOST, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
+from src.shared.llm.langfuse_client import get_langfuse_client
 from src.shared.logger import get_logger
 
 logger = get_logger(__name__)
@@ -107,23 +105,9 @@ class PromptManager:
 
     def __init__(self):
         self._local_defaults: Dict[str, str] = dict(_DEFAULT_PROMPTS)
-        self._langfuse: Optional[Langfuse] = None
+        self._langfuse = get_langfuse_client()
 
-        if LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY:
-            try:
-                self._langfuse = Langfuse(
-                    public_key=LANGFUSE_PUBLIC_KEY,
-                    secret_key=LANGFUSE_SECRET_KEY,
-                    host=LANGFUSE_HOST,
-                )
-            except Exception as e:
-                logger.warning(f"Could not initialize Langfuse client: {e}")
-        else:
-            logger.warning(
-                "Langfuse credentials not configured; prompts will use local defaults only"
-            )
-
-    def _get_prompt_client(self, name: str) -> Optional[Any]:
+    def get_prompt_client(self, name: str) -> Optional[Any]:
         """Fetch a prompt client for `name` from Langfuse, seeding it there on first use"""
         if self._langfuse is None:
             return None
@@ -155,7 +139,7 @@ class PromptManager:
 
     def get_template(self, template_name: str) -> Optional[str]:
         """Get the raw prompt text for a template, preferring the Langfuse-managed version"""
-        prompt = self._get_prompt_client(template_name)
+        prompt = self.get_prompt_client(template_name)
         if prompt is not None:
             return prompt.prompt
 
@@ -178,7 +162,7 @@ class PromptManager:
 
     def format_prompt(self, template_name: str, **variables: Any) -> Optional[str]:
         """Format a prompt template with provided variables"""
-        prompt = self._get_prompt_client(template_name)
+        prompt = self.get_prompt_client(template_name)
         if prompt is not None:
             try:
                 formatted = prompt.compile(**variables)

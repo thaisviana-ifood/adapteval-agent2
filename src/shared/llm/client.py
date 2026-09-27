@@ -5,6 +5,7 @@ import time
 from typing import Any, Optional
 from datetime import datetime
 import openai
+from langfuse.openai import AsyncOpenAI, OpenAI
 
 from src.config import (
     LLM_MODEL,
@@ -14,6 +15,7 @@ from src.config import (
     LLM_MAX_TOKENS,
     LLM_TIMEOUT,
 )
+from src.shared.llm.langfuse_client import get_langfuse_client
 from src.shared.logger import get_logger
 
 logger = get_logger(__name__)
@@ -35,8 +37,12 @@ class LLMClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
-        self.client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
-        self.async_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+
+        # Ensure the shared Langfuse client is registered (with the right host)
+        # before any traced OpenAI call is made.
+        get_langfuse_client()
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        self.async_client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
         self.call_count = 0
         self.last_call_time = None
 

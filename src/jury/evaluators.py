@@ -58,7 +58,15 @@ class LLMEvaluator(Evaluator):
             response, criteria, context
         )
 
-        eval_text = self.llm_client.call(prompt)
+        eval_text = self.llm_client.call(
+            prompt,
+            name=f"jury.{self.get_name()}",
+            langfuse_prompt=self.prompt_manager.get_prompt_client("llm_evaluation"),
+            metadata={
+                "evaluator_type": self.evaluator_type,
+                "task_type": context.get("task_type", "general"),
+            },
+        )
 
         evaluation = self._parse_evaluation(eval_text)
         evaluation["evaluator"] = self.get_name()
