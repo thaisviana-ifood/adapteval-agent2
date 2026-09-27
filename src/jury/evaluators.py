@@ -7,6 +7,7 @@ from src.config import JURY_PROVIDERS
 from src.shared.logger import get_logger
 from src.shared.llm.client import LLMClient
 from src.shared.llm.prompts import PromptManager
+from src.shared.llm.typesafe_client import TypesafeClient
 
 logger = get_logger(__name__)
 
@@ -152,6 +153,85 @@ class LLMEvaluator(Evaluator):
         return f"LLM-{self.evaluator_type}"
 
 
+class TypesafeEvaluator(Evaluator):
+    """LLM-as-judge evaluator backed by the Typesafe structured Q&A API
+
+    Typesafe isn't OpenAI-compatible: instead of a free-text prompt that
+    gets regex-parsed for a score (like LLMEvaluator), it takes a single
+    typed "score" question and returns the score/confidence directly -- see
+    TypesafeClient and https://docs.typesafe.ai/introduction/quickstart.
+    """
+
+    # Typesafe's "score" question returns the index of the matching label,
+    # and caps a question at 10 levels -- so this is a 0-9 scale, rescaled
+    # to 0-10 below to stay comparable with the other (LLMEvaluator-based)
+    # jurors' scores.
+    _SCALE_LABELS = [
+        "Completely fails the criteria",
+        "Very poor",
+        "Poor",
+        "Below average",
+        "Slightly below average",
+        "Average",
+        "Slightly above average",
+        "Good",
+        "Very good",
+        "Outstanding, fully meets all criteria",
+    ]
+
+    def __init__(self, model: str, api_key: str, base_url: str, timeout: int = 60):
+        self.client = TypesafeClient(
+            model=model, api_key=api_key, base_url=base_url, timeout=timeout
+        )
+
+    def evaluate(
+        self,
+        response: str,
+        criteria: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Evaluate response via a single Typesafe 'score' question"""
+        criteria_text = "\n".join(
+            f"- {c['name']}: {c['description']}"
+            for c in criteria.get("weighted_criteria", [])
+        )
+        instructions = (
+            "Rate the overall quality of the response against these criteria:\n"
+            f"{criteria_text}\n\n"
+            f"Task type: {context.get('task_type', 'general')}; "
+            f"Complexity: {context.get('complexity_score', 'unknown')}"
+        )
+
+        result = self.client.ask(
+            state=response,
+            questions={
+                "overall_quality": {
+                    "type": "score",
+                    "instructions": instructions,
+                    "criteria": self._SCALE_LABELS,
+                }
+            },
+        )
+        answer = result.get("answers", {}).get("overall_quality", {})
+        raw_score = float(answer.get("score", 4.5))  # 0-9
+        legend = answer.get("legend", {})
+
+        evaluation = {
+            "evaluator": self.get_name(),
+            "evaluator_type": "typesafe",
+            "score": raw_score * 10 / (len(self._SCALE_LABELS) - 1),  # rescaled to 0-10
+            "confidence": float(answer.get("confidence", 0.5)),
+            "reasoning": legend.get(str(int(raw_score)), ""),
+        }
+
+        logger.debug(f"Typesafe evaluation complete: {evaluation}")
+        return evaluation
+
+    def get_name(self) -> str:
+        """Get evaluator name"""
+        return "LLM-typesafe"
+
+
 class RulesBasedEvaluator(Evaluator):
     """Rules-based evaluator"""
 
@@ -283,16 +363,29 @@ class EvaluatorPanel:
         self._init_evaluators(providers or JURY_PROVIDERS)
 
     def _init_evaluators(self, providers: List[Dict[str, str]]) -> None:
-        """Initialize one LLM juror per provider"""
+        """Initialize one juror per provider
+
+        Typesafe isn't OpenAI-compatible, so it gets TypesafeEvaluator;
+        every other provider goes through the generic LLMEvaluator.
+        """
         for provider in providers:
-            self.evaluators.append(
-                LLMEvaluator(
-                    evaluator_type=provider["name"],
-                    model=provider.get("model"),
-                    api_key=provider.get("api_key"),
-                    base_url=provider.get("base_url"),
+            if provider["name"] == "typesafe":
+                self.evaluators.append(
+                    TypesafeEvaluator(
+                        model=provider["model"],
+                        api_key=provider["api_key"],
+                        base_url=provider["base_url"],
+                    )
                 )
-            )
+            else:
+                self.evaluators.append(
+                    LLMEvaluator(
+                        evaluator_type=provider["name"],
+                        model=provider.get("model"),
+                        api_key=provider.get("api_key"),
+                        base_url=provider.get("base_url"),
+                    )
+                )
 
     def evaluate(
         self,
