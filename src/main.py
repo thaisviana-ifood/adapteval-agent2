@@ -1,16 +1,11 @@
 """Main entry point for Adaptive LLM Jury Agent"""
 
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
-from src.config import validate_config
+from src.config import validate_config, USE_POSTGRES_MEMORY
 from src.shared.logger import get_logger
-from src.context_analysis import (
-    StructuralAnalyzer,
-    SemanticAnalyzer,
-    ComplexityAnalyzer,
-    IntentAnalyzer,
-)
+from src.context_analysis import ContextAnalyzer
 from src.rule_generator import (
     TaskClassifier,
     ObjectiveDefinition,
@@ -28,6 +23,7 @@ from src.memory_manager import (
     HistoryTracker,
     ErrorDetector,
     CalibrationManager,
+    PostgresMemoryStore,
 )
 
 logger = get_logger(__name__)
@@ -41,10 +37,7 @@ class AdaptiveJuryAgent:
         logger.info("Initializing Adaptive Jury Agent...")
 
         # Context analysis
-        self.structural_analyzer = StructuralAnalyzer()
-        self.semantic_analyzer = SemanticAnalyzer()
-        self.complexity_analyzer = ComplexityAnalyzer()
-        self.intent_analyzer = IntentAnalyzer()
+        self.context_analyzer = ContextAnalyzer()
 
         # Rule generation
         self.task_classifier = TaskClassifier()
@@ -64,11 +57,29 @@ class AdaptiveJuryAgent:
 
         # Memory management
         self.cache = CacheManager()
-        self.history = HistoryTracker()
+        self.memory_store = self._init_memory_store()
+        self.history = HistoryTracker(store=self.memory_store)
         self.error_detector = ErrorDetector()
         self.calibration = CalibrationManager()
 
         logger.info("Adaptive Jury Agent initialized successfully")
+
+    def _init_memory_store(self) -> Optional[PostgresMemoryStore]:
+        """Initialize the PostgreSQL-backed memory store, if enabled"""
+        if not USE_POSTGRES_MEMORY:
+            return None
+
+        store = PostgresMemoryStore()
+        if store.connect():
+            store.ensure_schema()
+            logger.info("Connected to PostgreSQL memory store")
+            return store
+
+        logger.warning(
+            "USE_POSTGRES_MEMORY is enabled but the connection failed; "
+            "falling back to in-memory history only"
+        )
+        return None
 
     async def evaluate(
         self,
@@ -103,7 +114,7 @@ class AdaptiveJuryAgent:
 
             # 2. Rule Generation
             logger.debug("Phase 2: Rule Generation")
-            rules = self._generate_rules(context)
+            rules = self._generate_rules(context, response, query)
 
             # 3. Jury Evaluation
             logger.debug("Phase 3: Jury Evaluation")
@@ -135,24 +146,13 @@ class AdaptiveJuryAgent:
         self, conversation: str
     ) -> Dict[str, Any]:
         """Analyze conversation context"""
-        context = {
-            "structural": self.structural_analyzer.analyze(
-                conversation
-            ),
-            "semantic": self.semantic_analyzer.analyze(
-                conversation
-            ),
-            "complexity": self.complexity_analyzer.analyze(
-                conversation
-            ),
-            "intent": self.intent_analyzer.analyze(
-                conversation
-            ),
-        }
-        return context
+        return self.context_analyzer.analyze(conversation)
 
     def _generate_rules(
-        self, context: Dict[str, Any]
+        self,
+        context: Dict[str, Any],
+        response: str,
+        query: str,
     ) -> Dict[str, Any]:
         """Generate evaluation rules"""
         # Classify task
@@ -166,9 +166,7 @@ class AdaptiveJuryAgent:
         criteria = self.criteria_gen.generate(context, objectives)
 
         # Run heuristics
-        heuristics = self.heuristic_checker.check_all(
-            "", context.get("semantic", {})
-        )
+        heuristics = self.heuristic_checker.check_all(response, query)
 
         return {
             "task_type": task_type,

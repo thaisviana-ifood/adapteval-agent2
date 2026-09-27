@@ -1,9 +1,10 @@
 """History tracking for metrics and responses"""
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from src.shared.logger import get_logger
+from src.memory_manager.postgres_store import PostgresMemoryStore
 
 logger = get_logger(__name__)
 
@@ -11,10 +12,17 @@ logger = get_logger(__name__)
 class HistoryTracker:
     """Track history of evaluations and metrics"""
 
-    def __init__(self):
+    def __init__(self, store: Optional[PostgresMemoryStore] = None):
+        """
+        Args:
+            store: Optional PostgreSQL-backed store. When provided, every
+                recorded evaluation/metric is also persisted there in
+                addition to the in-memory lists below.
+        """
         self.evaluation_history: List[Dict] = []
         self.metrics_history: List[Dict] = []
         self.response_times: List[float] = []
+        self.store = store
 
     def record_evaluation(
         self,
@@ -46,6 +54,9 @@ class HistoryTracker:
         self.evaluation_history.append(record)
         logger.debug(f"Recorded evaluation: {evaluation_id}")
 
+        if self.store is not None:
+            self.store.save_evaluation(record)
+
     def record_metrics(
         self,
         metric_name: str,
@@ -71,6 +82,9 @@ class HistoryTracker:
         logger.debug(
             f"Recorded metric: {metric_name} = {value}"
         )
+
+        if self.store is not None:
+            self.store.save_metric(record)
 
     def record_response_time(self, duration_seconds: float) -> None:
         """Record response processing time"""
@@ -181,6 +195,18 @@ class HistoryTracker:
         logger.info(
             f"Removed {removed} evaluation records older than "
             f"{days} days"
+        )
+
+    def load_from_store(self, limit: int = 100) -> None:
+        """Hydrate in-memory history from the PostgreSQL store, if configured"""
+        if self.store is None:
+            return
+
+        self.evaluation_history = self.store.get_evaluation_history(limit)
+        self.metrics_history = self.store.get_metrics_history(limit=limit)
+        logger.info(
+            f"Loaded {len(self.evaluation_history)} evaluations and "
+            f"{len(self.metrics_history)} metrics from PostgreSQL"
         )
 
     def export_history(self) -> Dict[str, Any]:

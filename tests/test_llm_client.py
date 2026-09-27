@@ -29,9 +29,9 @@ def make_rate_limit_error(message: str = "rate limited") -> openai.RateLimitErro
     return openai.RateLimitError(message, response=response, body=None)
 
 
-def skip_sleep(coro) -> None:
-    """Stand-in for asyncio.run that discards the sleep instead of awaiting it"""
-    coro.close()
+def skip_sleep(seconds) -> None:
+    """Stand-in for time.sleep that skips the actual wait"""
+    return None
 
 
 class TestLLMClientConfiguration:
@@ -93,7 +93,7 @@ class TestLLMClientCall:
         client.client.chat.completions.create = MagicMock(
             side_effect=[make_rate_limit_error(), make_chat_response("recovered")]
         )
-        monkeypatch.setattr("asyncio.run", skip_sleep)
+        monkeypatch.setattr("time.sleep", skip_sleep)
 
         result = client.call("ping", max_retries=3)
 
@@ -105,7 +105,7 @@ class TestLLMClientCall:
         client.client.chat.completions.create = MagicMock(
             side_effect=make_api_error("persistent failure")
         )
-        monkeypatch.setattr("asyncio.run", skip_sleep)
+        monkeypatch.setattr("time.sleep", skip_sleep)
 
         with pytest.raises(openai.APIError):
             client.call("ping", max_retries=2)

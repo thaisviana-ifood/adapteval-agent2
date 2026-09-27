@@ -34,6 +34,11 @@ DB_USER: str = os.getenv("DB_USER", "admin")
 DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 DB_NAME: str = os.getenv("DB_NAME", "adapteval_agent")
 
+# Set to "true" to persist evaluation/metrics history in PostgreSQL
+# (see src/memory_manager/postgres_store.py) instead of keeping it
+# only in memory.
+USE_POSTGRES_MEMORY: bool = os.getenv("USE_POSTGRES_MEMORY", "False").lower() == "true"
+
 # Vector DB Configuration (for memory)
 VECTOR_DB_HOST: str = os.getenv("VECTOR_DB_HOST", "localhost")
 VECTOR_DB_PORT: int = int(os.getenv("VECTOR_DB_PORT", "6379"))

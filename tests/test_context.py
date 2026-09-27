@@ -6,6 +6,7 @@ from src.context_analysis import (
     SemanticAnalyzer,
     ComplexityAnalyzer,
     IntentAnalyzer,
+    ContextAnalyzer,
 )
 
 
@@ -78,6 +79,32 @@ class TestIntentAnalyzer:
         assert "user_intents" in result
         assert "assistant_objectives" in result
         assert "intent_alignment_score" in result
+
+
+class TestContextAnalyzer:
+    """Test the combined context analyzer"""
+
+    def test_analyze(self):
+        """Test that all four dimensions are present in the result"""
+        analyzer = ContextAnalyzer()
+        conversation = (
+            "User: Can you explain how neural networks work?\n\n"
+            "Assistant: Neural networks are computing systems "
+            "inspired by biological neurons."
+        )
+
+        result = analyzer.analyze(conversation)
+
+        assert set(result.keys()) == {
+            "structural",
+            "semantic",
+            "complexity",
+            "intent",
+        }
+        assert "total_turns" in result["structural"]
+        assert "topics" in result["semantic"]
+        assert "complexity_score" in result["complexity"]
+        assert "user_intents" in result["intent"]
 
 
 if __name__ == "__main__":

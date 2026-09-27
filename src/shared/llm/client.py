@@ -1,6 +1,7 @@
 """LLM client wrapper with retry and rate-limit handling"""
 
 import asyncio
+import time
 from typing import Any, Optional
 from datetime import datetime
 import openai
@@ -88,12 +89,12 @@ class LLMClient:
                 logger.warning(
                     f"Rate limited. Waiting {wait_time}s before retry..."
                 )
-                asyncio.run(asyncio.sleep(wait_time))
+                time.sleep(wait_time)
 
             except openai.APIError as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"API error on attempt {attempt + 1}: {e}")
-                    asyncio.run(asyncio.sleep(2 ** attempt))
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error(f"Failed after {max_retries} attempts: {e}")
                     raise
