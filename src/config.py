@@ -53,6 +53,14 @@ JURY_PROVIDERS: List[Dict[str, str]] = [
     },
 ]
 
+# Jurors judge every rubric criterion independently in one call, and a
+# reasoning model (e.g. deepseek-v4-pro) spends part of this budget on
+# hidden reasoning tokens before it writes any visible verdict -- with the
+# default LLM_MAX_TOKENS that reasoning alone can exhaust the budget and
+# truncate/empty the output on a rubric with many criteria. Give jurors a
+# much larger budget than other pipeline stages need.
+JURY_LLM_MAX_TOKENS: int = int(os.getenv("JURY_LLM_MAX_TOKENS", "8000"))
+
 # Database Configuration
 DB_HOST: str = os.getenv("DB_HOST", "localhost")
 DB_PORT: int = int(os.getenv("DB_PORT", "5432"))

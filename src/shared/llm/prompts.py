@@ -129,7 +129,7 @@ Example of a good criterion, for a task that asks the assistant to cite sources:
 
 Return ONLY a JSON array, with no surrounding text, in this exact form:
 [{"name": "Short Name", "description": "Does the response ...?"}]""",
-    "llm_evaluation": """You are an impartial evaluator scoring an AI assistant's response.
+    "llm_evaluation": """You are an impartial evaluator checking an AI assistant's response against a rubric of boolean (yes/no) criteria.
 
 Task Context:
 - Task Type: {{task_type}}
@@ -138,20 +138,18 @@ Task Context:
 Response to Evaluate:
 {{response}}
 
-Evaluation Criteria (each is a strict yes/no check):
+Rubric (decide True or False for each criterion, independently -- do not average them into an overall score):
 {{criteria_text}}
 
-Check the response against every criterion above before scoring. A response that fails a criterion cannot receive full marks; do not give partial credit for a failed criterion.
+For each criterion, answer True only if the response clearly and fully satisfies it; otherwise answer False. Do not skip any criterion, and do not answer "partially" or "somewhat".
 
-Respond in EXACTLY this format, with no extra commentary before or after:
+Respond in EXACTLY this format, with no extra commentary before or after, one line per criterion in the exact order listed above, using the criterion name exactly as written in the rubric:
 
-Score: <single number from 0 to 10, no range, no fraction>
-Confidence: <single number from 0 to 1>
-Strengths:
-- <bullet, tied to a specific criterion>
-Weaknesses:
-- <bullet, tied to a specific criterion>
-Reasoning: <2-4 sentences explaining the score, referencing which criteria passed or failed>""",
+<Criterion Name>: True|False
+<Criterion Name>: True|False
+...
+Confidence: <single number from 0 to 1, your overall confidence in these verdicts>
+Reasoning: <2-4 sentences justifying the verdicts, referencing which criteria passed or failed>""",
 }
 
 

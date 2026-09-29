@@ -66,24 +66,27 @@ def _build_evaluation_output(
     for evaluation in jury_result.get("evaluations", []):
         confidence = float(evaluation.get("confidence", 0.5))
         evaluator = evaluation.get("evaluator", "evaluator")
+        criterion_confidences = evaluation.get("criterion_confidences", {})
 
-        if "scores" in evaluation:
-            for criterion, score in evaluation["scores"].items():
-                metrics.append(
-                    MetricaAvaliada(
-                        metrica=f"{evaluator}.{criterion}",
-                        valor=float(score),
-                        confianca=confidence,
-                    )
-                )
-        elif "score" in evaluation:
+        for criterion, passed in evaluation.get("verdicts", {}).items():
             metrics.append(
                 MetricaAvaliada(
-                    metrica=evaluator,
-                    valor=float(evaluation["score"]),
-                    confianca=confidence,
+                    metrica=f"{evaluator}.{criterion}",
+                    valor=1.0 if passed else 0.0,
+                    confianca=float(
+                        criterion_confidences.get(criterion, confidence)
+                    ),
                 )
             )
+
+    for criterion, verdict in jury_result.get("verdicts", {}).items():
+        metrics.append(
+            MetricaAvaliada(
+                metrica=f"jury.{criterion}",
+                valor=1.0 if verdict.get("passed") else 0.0,
+                confianca=float(verdict.get("confidence", 0.5)),
+            )
+        )
 
     component_confidences = {
         "jury": jury_result.get("confidence", 0.5),
@@ -213,8 +216,22 @@ class PipelineNodes:
         context = state["context_analysis"]
         rules = state["rule_generation"]
 
+        # Evaluators read flat "task_type"/"complexity_score" keys (see
+        # LLMEvaluator/TypesafeEvaluator), but context_analysis nests
+        # complexity under "complexity" and doesn't carry task_type at all
+        # (that's produced by rule_generation) -- without this, every juror
+        # prompt/instruction always said "Task type: general" and
+        # "Complexity: unknown", regardless of the actual conversation.
+        jury_context = {
+            **context,
+            "task_type": rules["task_type"],
+            "complexity_score": context.get("complexity", {}).get(
+                "complexity_score"
+            ),
+        }
+
         jury_result = self.evaluator_panel.evaluate(
-            response, rules["criteria"], context
+            response, rules["criteria"], jury_context
         )
 
         confidence = jury_result.get("confidence", 0.5)

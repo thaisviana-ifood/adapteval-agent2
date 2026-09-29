@@ -14,7 +14,13 @@ class MetricaAvaliada(BaseModel):
     """A single (metric, value, confidence) triple"""
 
     metrica: str = Field(description="Nome da métrica avaliada")
-    valor: float = Field(description="Valor obtido para a métrica (escala 0-10)")
+    valor: float = Field(
+        description=(
+            "Valor obtido para a métrica: 1.0/0.0 para vereditos de rubrica "
+            "booleana (ex: jury.*, <evaluator>.*), ou escala 0-10 para as "
+            "métricas de consolidação final (final.*)"
+        )
+    )
     confianca: float = Field(description="Confiança associada ao valor (0-1)")
 
 

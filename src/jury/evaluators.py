@@ -3,7 +3,7 @@
 from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
 
-from src.config import JURY_PROVIDERS
+from src.config import JURY_LLM_MAX_TOKENS, JURY_PROVIDERS
 from src.shared.logger import get_logger
 from src.shared.llm.client import LLMClient
 from src.shared.llm.langfuse_client import get_langfuse_client
@@ -51,7 +51,7 @@ class LLMEvaluator(Evaluator):
         # empty string -- e.g. an unset TYPESAFE_BASE_URL -- must still be
         # passed through, so the client fails loudly instead of silently
         # falling back to LLMClient's DeepSeek-flavored defaults.
-        client_kwargs: Dict[str, str] = {}
+        client_kwargs: Dict[str, Any] = {"max_tokens": JURY_LLM_MAX_TOKENS}
         if model is not None:
             client_kwargs["model"] = model
         if api_key is not None:
@@ -70,7 +70,7 @@ class LLMEvaluator(Evaluator):
         context: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Evaluate response using LLM
+        Evaluate response using LLM, as a True/False verdict per criterion
 
         Args:
             response: Response to evaluate
@@ -78,7 +78,7 @@ class LLMEvaluator(Evaluator):
             context: Context information
 
         Returns:
-            Evaluation results with scores and reasoning
+            Evaluation results with per-criterion verdicts and reasoning
         """
         prompt = self._build_eval_prompt(
             response, criteria, context
@@ -94,7 +94,10 @@ class LLMEvaluator(Evaluator):
             },
         )
 
-        evaluation = self._parse_evaluation(eval_text)
+        criterion_names = [
+            c["name"] for c in criteria.get("weighted_criteria", [])
+        ]
+        evaluation = self._parse_evaluation(eval_text, criterion_names)
         evaluation["evaluator"] = self.get_name()
         evaluation["evaluator_type"] = self.evaluator_type
 
@@ -123,29 +126,47 @@ class LLMEvaluator(Evaluator):
             complexity_score=context.get("complexity_score", "unknown"),
         )
 
-    def _parse_evaluation(self, eval_text: str) -> Dict[str, Any]:
-        """Parse LLM evaluation output"""
+    def _parse_evaluation(
+        self, eval_text: str, criterion_names: List[str]
+    ) -> Dict[str, Any]:
+        """Parse the LLM's per-criterion True/False verdicts
+
+        A criterion the model didn't answer in the expected
+        "<name>: True|False" format is simply left out of "verdicts" --
+        this juror abstains on it rather than defaulting to a guessed
+        verdict, so the panel's per-criterion vote isn't skewed by a
+        parsing failure.
+        """
         # Simple parsing - can be enhanced
-        evaluation = {
-            "score": 5.0,
+        evaluation: Dict[str, Any] = {
+            "verdicts": {},
             "confidence": 0.5,
-            "strengths": [],
-            "weaknesses": [],
             "reasoning": eval_text,
         }
 
-        # Try to extract score
-        if "Score" in eval_text:
-            lines = eval_text.split("\n")
+        lines = eval_text.split("\n")
+        for name in criterion_names:
+            prefix = f"{name.lower()}:"
             for line in lines:
-                if "Score" in line:
-                    try:
-                        score_str = line.split(":")[-1].strip()
-                        evaluation["score"] = float(
-                            score_str.split("/")[0]
-                        )
-                    except ValueError:
-                        pass
+                stripped = line.strip()
+                if not stripped.lower().startswith(prefix):
+                    continue
+                verdict_text = stripped.split(":", 1)[1].strip().lower()
+                if verdict_text.startswith("true"):
+                    evaluation["verdicts"][name] = True
+                elif verdict_text.startswith("false"):
+                    evaluation["verdicts"][name] = False
+                break
+
+        for line in lines:
+            if line.strip().lower().startswith("confidence:"):
+                try:
+                    evaluation["confidence"] = float(
+                        line.split(":", 1)[1].strip()
+                    )
+                except ValueError:
+                    pass
+                break
 
         return evaluation
 
@@ -158,27 +179,11 @@ class TypesafeEvaluator(Evaluator):
     """LLM-as-judge evaluator backed by the Typesafe structured Q&A API
 
     Typesafe isn't OpenAI-compatible: instead of a free-text prompt that
-    gets regex-parsed for a score (like LLMEvaluator), it takes a single
-    typed "score" question and returns the score/confidence directly -- see
-    TypesafeClient and https://docs.typesafe.ai/introduction/quickstart.
+    gets regex-parsed (like LLMEvaluator), it takes typed questions and
+    returns structured answers directly -- see TypesafeClient and
+    https://docs.typesafe.ai/introduction/quickstart. One boolean "noul"
+    (yes/no) question is asked per rubric criterion.
     """
-
-    # Typesafe's "score" question returns the index of the matching label,
-    # and caps a question at 10 levels -- so this is a 0-9 scale, rescaled
-    # to 0-10 below to stay comparable with the other (LLMEvaluator-based)
-    # jurors' scores.
-    _SCALE_LABELS = [
-        "Completely fails the criteria",
-        "Very poor",
-        "Poor",
-        "Below average",
-        "Slightly below average",
-        "Average",
-        "Slightly above average",
-        "Good",
-        "Very good",
-        "Outstanding, fully meets all criteria",
-    ]
 
     def __init__(self, model: str, api_key: str, base_url: str, timeout: int = 60):
         self.client = TypesafeClient(
@@ -196,23 +201,35 @@ class TypesafeEvaluator(Evaluator):
         criteria: Dict[str, Any],
         context: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Evaluate response via a single Typesafe 'score' question"""
-        criteria_text = "\n".join(
-            f"- {c['name']}: {c['description']}"
-            for c in criteria.get("weighted_criteria", [])
-        )
-        instructions = (
-            "Rate the overall quality of the response against these criteria:\n"
-            f"{criteria_text}\n\n"
+        """Evaluate response via one Typesafe 'noul' (yes/no) question per criterion
+
+        Instructions mirror LLMEvaluator's "llm_evaluation" prompt (same
+        task context, same "fully satisfies, no partial credit" standard) so
+        Typesafe isn't held to a looser or stricter bar than the other
+        jurors just because it's a different API shape.
+        """
+        weighted_criteria = criteria.get("weighted_criteria", [])
+        task_note = (
             f"Task type: {context.get('task_type', 'general')}; "
             f"Complexity: {context.get('complexity_score', 'unknown')}"
         )
+
+        key_to_name = {
+            f"criterion_{i}": c["name"] for i, c in enumerate(weighted_criteria)
+        }
         questions = {
-            "overall_quality": {
-                "type": "score",
-                "instructions": instructions,
-                "criteria": self._SCALE_LABELS,
+            key: {
+                "type": "noul",
+                "instructions": (
+                    f"Task context -- {task_note}\n\n"
+                    f"Criterion -- {c['name']}: {c['description']}\n\n"
+                    "Answer True only if the response clearly and fully "
+                    "satisfies this criterion; otherwise answer False. Do "
+                    "not give partial credit for a partially satisfied "
+                    "criterion."
+                ),
             }
+            for key, c in zip(key_to_name, weighted_criteria)
         }
 
         if self._langfuse is not None:
@@ -234,16 +251,28 @@ class TypesafeEvaluator(Evaluator):
         else:
             result = self.client.ask(state=response, questions=questions)
 
-        answer = result.get("answers", {}).get("overall_quality", {})
-        raw_score = float(answer.get("score", 4.5))  # 0-9
-        legend = answer.get("legend", {})
+        answers = result.get("answers", {})
+        verdicts: Dict[str, bool] = {}
+        criterion_confidences: Dict[str, float] = {}
+        for key, name in key_to_name.items():
+            answer = answers.get(key, {})
+            # "noul" has no separate confidence field: its own answer is
+            # already a 0-1 probability, so distance from the 0.5 decision
+            # boundary doubles as this verdict's confidence.
+            noul = float(answer.get("noul", 0.5))
+            verdicts[name] = noul >= 0.5
+            criterion_confidences[name] = abs(noul - 0.5) * 2
 
         evaluation = {
             "evaluator": self.get_name(),
             "evaluator_type": "typesafe",
-            "score": raw_score * 10 / (len(self._SCALE_LABELS) - 1),  # rescaled to 0-10
-            "confidence": float(answer.get("confidence", 0.5)),
-            "reasoning": legend.get(str(int(raw_score)), ""),
+            "verdicts": verdicts,
+            "criterion_confidences": criterion_confidences,
+            "confidence": (
+                sum(criterion_confidences.values()) / len(criterion_confidences)
+                if criterion_confidences
+                else 0.5
+            ),
         }
 
         logger.debug(f"Typesafe evaluation complete: {evaluation}")
@@ -378,6 +407,13 @@ class EvaluatorPanel:
     LLMEvaluator, so adding/swapping a provider is a config change, not a
     code change. Defaults to JURY_PROVIDERS (DeepSeek, OpenAI, Typesafe --
     see src/config.py), matching MIN_EVALUATORS=3.
+
+    Jurors don't grade a response on a scale -- each one answers every
+    rubric criterion True/False (see `_vote_on_criterion`). The panel's
+    verdict for each criterion is a majority vote among the jurors that
+    answered it: whichever side (True/False) has more votes wins, and only
+    those concordant jurors' confidences count. A tie means no real
+    majority, so that criterion fails closed (counts as False).
     """
 
     def __init__(self, providers: Optional[List[Dict[str, str]]] = None):
@@ -416,7 +452,7 @@ class EvaluatorPanel:
         context: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Get evaluations from all panel members
+        Get True/False verdicts from all panel members and vote per criterion
 
         Args:
             response: Response to evaluate
@@ -424,7 +460,8 @@ class EvaluatorPanel:
             context: Context information
 
         Returns:
-            Combined panel evaluation
+            Combined panel evaluation: a verdict per criterion, plus the
+            resulting pass rate (fraction of criteria that passed the vote)
         """
         evaluations = []
 
@@ -434,27 +471,102 @@ class EvaluatorPanel:
             )
             evaluations.append(evaluation)
 
+        criterion_names: List[str] = []
+        seen = set()
+        for c in criteria.get("weighted_criteria", []):
+            if c["name"] not in seen:
+                seen.add(c["name"])
+                criterion_names.append(c["name"])
+
+        verdicts: Dict[str, Dict[str, Any]] = {
+            name: self._vote_on_criterion(name, evaluations)
+            for name in criterion_names
+        }
+
+        passed_count = sum(1 for v in verdicts.values() if v["passed"])
+        pass_rate = passed_count / len(verdicts) if verdicts else 0.0
+        overall_confidence = (
+            sum(v["confidence"] for v in verdicts.values()) / len(verdicts)
+            if verdicts
+            else 0.0
+        )
+
         panel_result = {
             "evaluations": evaluations,
             "panel_size": len(evaluations),
-            "average_score": (
-                sum(
-                    e.get("score", e.get("average_score", 5))
-                    for e in evaluations
-                )
-                / len(evaluations)
-            ),
-            "confidence": (
-                sum(
-                    e.get("confidence", 0.5)
-                    for e in evaluations
-                )
-                / len(evaluations)
-            ),
+            "verdicts": verdicts,
+            "passed_count": passed_count,
+            "criteria_count": len(verdicts),
+            "pass_rate": pass_rate,
+            "confidence": overall_confidence,
+            # Backward-compat scalar (0-10) for consumers built around a
+            # numeric jury score (FinalScoreCalculator, AccuracyCalculator,
+            # HITL) -- derived from pass_rate, not a juror-assigned grade.
+            "average_score": pass_rate * 10,
         }
 
         logger.debug(
             f"Panel evaluation complete. "
-            f"Average score: {panel_result['average_score']:.2f}"
+            f"Pass rate: {passed_count}/{len(verdicts)} criteria"
         )
         return panel_result
+
+    def _vote_on_criterion(
+        self, criterion_name: str, evaluations: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Majority-vote a single criterion across jurors that answered it
+
+        Jurors that didn't return a verdict for this criterion (parsing
+        failure, question omitted, etc.) simply don't get a vote. Whichever
+        side -- True or False -- has more votes wins, and only those
+        concordant jurors' confidences feed the criterion's confidence. A
+        tie (no real majority) fails closed: the criterion counts as False.
+        """
+        votes: Dict[str, bool] = {}
+        confidences: Dict[str, float] = {}
+
+        for evaluation in evaluations:
+            criterion_verdicts = evaluation.get("verdicts", {})
+            if criterion_name not in criterion_verdicts:
+                continue
+            evaluator_name = evaluation.get("evaluator", "evaluator")
+            votes[evaluator_name] = criterion_verdicts[criterion_name]
+            # Prefer this juror's per-criterion confidence (e.g. Typesafe's
+            # noul distance-from-0.5) over its one overall confidence, which
+            # would otherwise flatten every criterion to the same number.
+            confidences[evaluator_name] = evaluation.get(
+                "criterion_confidences", {}
+            ).get(criterion_name, evaluation.get("confidence", 0.5))
+
+        if not votes:
+            return {
+                "passed": False,
+                "agreement": False,
+                "votes": {},
+                "confidence": 0.0,
+                "concordant_evaluators": [],
+            }
+
+        true_voters = [name for name, v in votes.items() if v]
+        false_voters = [name for name, v in votes.items() if not v]
+
+        if len(true_voters) > len(false_voters):
+            concordant, passed = true_voters, True
+        elif len(false_voters) > len(true_voters):
+            concordant, passed = false_voters, False
+        else:
+            concordant, passed = [], False
+
+        confidence = (
+            sum(confidences[name] for name in concordant) / len(concordant)
+            if concordant
+            else 0.0
+        )
+
+        return {
+            "passed": passed,
+            "agreement": len(concordant) == len(votes),
+            "votes": votes,
+            "confidence": confidence,
+            "concordant_evaluators": concordant,
+        }
