@@ -1,0 +1,11 @@
+{
+  "name": "adapteval-agent2-docs",
+  "private": true,
+  "description": "Tooling to render mermaid diagrams used in doc/",
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "^11.4.2"
+  },
+  "scripts": {
+    "diagram:architecture": "mmdc -i doc/diagrams/agentic_architecture.mmd -o doc/diagrams/agentic_architecture.svg -b transparent"
+  }
+}

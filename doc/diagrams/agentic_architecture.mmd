@@ -1,0 +1,65 @@
+flowchart TD
+    SCRIPT["scripts/run_deep_agent.py"]
+    PROG["run_pipeline()\nchamada direta ao grafo"]
+
+    subgraph DEEPAGENT["Deep Agent (deepagents) — front-end conversacional"]
+        direction LR
+        LLM["ChatOpenAI\n(LLM_MODEL)"]
+        TOOL["tool:\nrun_thesis_pipeline(conversation)"]
+        LLM -->|"decide chamar a tool"| TOOL
+        TOOL -.->|"retorna JSON cru"| LLM
+    end
+
+    MEM_CACHE["CacheManager\n(skip se já avaliado)"]
+
+    subgraph GRAPH["LangGraph — thesis-evaluation-pipeline (src/agent/pipeline_graph.py)"]
+        direction LR
+        N1["1. context_analysis\nsrc/context_analysis\n(structural · semantic ·\ncomplexity · intent)"]
+        N2["2. rule_generation\nsrc/rule_generator\n(TaskClassifier ·\nObjectiveDefinition ·\nCriteriaGenerator ·\nHeuristicChecker)"]
+        N3["3. jury_evaluation\nsrc/jury\n(EvaluatorPanel: LLM\nevaluators em paralelo ·\nHumanInTheLoop)"]
+        N4["4. metrics_aggregation\nsrc/metrics\n(AccuracyCalculator ·\nFinalScoreCalculator)"]
+        N1 --> N2 --> N3 --> N4
+    end
+
+    CKPT[("Checkpointer\nPostgresSaver / InMemorySaver\n1 snapshot por nó, chave thread_id")]
+    OUT["EvaluationOutput\n(avaliação, nota_confiança_global,\nrelatório_consolidação_métricas)"]
+
+    subgraph MEMORY["Memory Manager (src/memory_manager)"]
+        direction LR
+        MEM_HIST["HistoryTracker"]
+        MEM_ERR["ErrorDetector"]
+        MEM_STORE[("PostgresMemoryStore\nUSE_POSTGRES_MEMORY")]
+        MEM_HIST --> MEM_STORE
+    end
+
+    LANGFUSE["Langfuse\nCallbackHandler + prompt management\ntraço end-to-end: agent → tool → graph → nós"]
+
+    SCRIPT --> PROG
+    SCRIPT -.->|"--use-agent"| LLM
+    TOOL --> PROG
+    PROG --> MEM_CACHE
+    MEM_CACHE -->|"cache miss"| N1
+    GRAPH <-.->|"salva / restaura estado"| CKPT
+    N4 --> OUT
+    N4 --> MEM_HIST
+    N4 --> MEM_ERR
+    OUT -->|"cache_evaluation()"| MEM_CACHE
+
+    LANGFUSE -.-> DEEPAGENT
+    LANGFUSE -.-> GRAPH
+
+    classDef entry fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;
+    classDef agent fill:#fef3c7,stroke:#d97706,color:#78350f;
+    classDef node fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
+    classDef memory fill:#dcfce7,stroke:#16a34a,color:#14532d;
+    classDef obs fill:#fae8ff,stroke:#a21caf,color:#4a044e;
+    classDef store fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    classDef output fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+
+    class SCRIPT,PROG entry;
+    class LLM,TOOL agent;
+    class N1,N2,N3,N4 node;
+    class MEM_CACHE,MEM_HIST,MEM_ERR memory;
+    class MEM_STORE,CKPT store;
+    class LANGFUSE obs;
+    class OUT output;

@@ -5,6 +5,17 @@ Este é o módulo que amarra os outros quatro (`context_analysis`,
 persistido, e expõe dois jeitos de rodá-lo: chamada direta (schema
 garantido) ou via agente conversacional.
 
+## Diagrama da arquitetura agêntica
+
+Diagrama completo (deep agent, grafo LangGraph, memory manager, checkpointer
+e observabilidade Langfuse): fonte em
+[diagrams/agentic_architecture.mmd](diagrams/agentic_architecture.mmd),
+renderizado em
+[diagrams/agentic_architecture.svg](diagrams/agentic_architecture.svg) /
+[.png](diagrams/agentic_architecture.png). Para regenerar após editar o
+`.mmd`: `npm install` (instala `@mermaid-js/mermaid-cli` como devDependency)
+e `npm run diagram:architecture`.
+
 ## Arquivos
 
 ### `state.py` — `PipelineState`

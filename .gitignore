@@ -23,6 +23,10 @@ logs/
 data/annotated/
 data/output/
 
+# Node (mermaid-cli, used to render doc/diagrams/*.mmd)
+node_modules/
+.npm-cache/
+
 # Editor / OS
 .DS_Store
 .vscode/
