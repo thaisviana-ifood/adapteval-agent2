@@ -22,8 +22,12 @@ Pontos importantes:
   `RateLimitError` e `APIError` genérico.
 - `call(prompt, system_prompt=None, max_retries=3, **kwargs)`: síncrono,
   devolve `response.choices[0].message.content` (pode vir `""` se o modelo
-  gastou todo o orçamento de tokens em raciocínio interno — ver nota sobre
-  `JURY_LLM_MAX_TOKENS` em [jury.md](jury.md) e [config.md](config.md)).
+  gastou todo o orçamento de tokens em raciocínio interno — ver notas sobre
+  `JURY_LLM_MAX_TOKENS` e `CLASSIFIER_LLM_MAX_TOKENS` em
+  [jury.md](jury.md) e [config.md](config.md)). Quando isso acontece
+  (`finish_reason == "length"`), `_content_of` loga um aviso nomeando o
+  modelo, o limite atingido e quantos tokens foram para raciocínio, para a
+  causa não ficar invisível em quem só recebe a string vazia.
 - `acall(...)`: mesma coisa, assíncrono.
 - Cada instância de `LLMEvaluator` (em `jury/evaluators.py`) cria seu
   próprio `LLMClient`, então cada provider descobre suas próprias manias

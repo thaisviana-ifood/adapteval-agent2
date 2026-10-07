@@ -91,6 +91,13 @@ do prompt entra em `classifier_failures` e os outros campos não são
 afetados. `classifier_failures == []` é o sinal de que a parte LLM saiu
 completa; os campos estatísticos nunca degradam.
 
+Esse isolamento tem um custo: orçamento de tokens curto não quebra nada, só
+esvazia o campo. Por isso o `SemanticAnalyzer` constrói seu `LLMClient` com
+`max_tokens=CLASSIFIER_LLM_MAX_TOKENS` (default `8000`) em vez do
+`LLM_MAX_TOKENS` (2048) — com o default, o classificador de key phrases
+gastava os 2048 tokens inteiros em raciocínio e devolvia conteúdo vazio em
+toda conversa. Ver [config.md](config.md).
+
 ## `complexity.py` — `ComplexityAnalyzer`
 
 Produz `complexity_score` (0-10, quanto maior mais complexo), combinando:
