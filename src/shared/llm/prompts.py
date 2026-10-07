@@ -150,6 +150,65 @@ Respond in EXACTLY this format, with no extra commentary before or after, one li
 ...
 Confidence: <single number from 0 to 1, your overall confidence in these verdicts>
 Reasoning: <2-4 sentences justifying the verdicts, referencing which criteria passed or failed>""",
+    # The three prompts below back SemanticAnalyzer's LLM classifiers
+    # (src/context_analysis/semantic.py). They are deliberately separate
+    # prompts rather than one combined call so each classifier can be
+    # versioned and tuned on its own in Langfuse. Topics are NOT one of
+    # them: those come from TF-IDF, with no LLM call.
+    "semantic_key_phrase_extraction": """You are extracting the key phrases from a conversation between a user and an AI assistant, to support downstream evaluation of the assistant's responses.
+
+Conversation:
+{{conversation}}
+
+A key phrase is a short span carrying the conversation's substance: what the user is asking for, the constraints or requirements they state, and the commitments or conclusions the assistant gives. Greetings, pleasantries, and procedural filler are not key phrases.
+
+Return a single JSON object with exactly these keys:
+- "key_phrases": a list of at most {{max_key_phrases}} phrases, ordered from most to least important.
+- "confidence": float, 0-1 -- your confidence in this extraction.
+
+Rules:
+- Each phrase must be 2-8 words and written in English regardless of the conversation's original language.
+- Each phrase must faithfully render something actually said in the conversation; do not invent, generalize, or editorialize.
+- Do not express the same idea in two phrases.
+- Return fewer phrases, or an empty list, rather than padding with filler.
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
+    "semantic_summary_generation": """You are summarizing a conversation between a user and an AI assistant, to support downstream evaluation of the assistant's responses.
+
+Conversation:
+{{conversation}}
+
+Return a single JSON object with exactly these keys:
+- "summary": {{max_summary_sentences}} sentences or fewer, covering what the user wanted, what the assistant did about it, and where the conversation ended up.
+- "confidence": float, 0-1 -- your confidence that this summary is faithful and complete (lower it when the conversation is truncated, incoherent, or cuts off mid-task).
+
+Rules:
+- Write the summary in English regardless of the conversation's original language.
+- Summarize only what the conversation says; do not add background, explanations, or assumptions about what happened outside it.
+- Do not evaluate, praise, or criticize the assistant -- describe what happened and let the evaluation stage judge it.
+- Say so plainly if the user's request was left unresolved.
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
+    "semantic_sentiment_classification": """You are a sentiment classifier. Judge the overall tone of a conversation between a user and an AI assistant, from the user's point of view.
+
+Conversation:
+{{conversation}}
+
+Classify the conversation into exactly one label:
+- "positive": the user is satisfied or appreciative, or their problem is clearly resolved.
+- "neutral": the exchange is matter-of-fact, with no clear satisfaction or dissatisfaction.
+- "negative": the user is frustrated or dissatisfied, or their problem is clearly left unresolved.
+- "mixed": the conversation contains both clearly positive and clearly negative stretches.
+
+Return a single JSON object with exactly these keys:
+- "label": one of "positive", "neutral", "negative", "mixed".
+- "sentiment_score": float, 0-1, where 0.0 is maximally negative, 0.5 is neutral, and 1.0 is maximally positive.
+- "confidence": float, 0-1 -- your confidence in the label.
+- "rationale": 1-2 sentences citing the specific wording that decided the label.
+
+Rules:
+- Judge the user's sentiment, not the assistant's politeness: an assistant that stays cheerful while failing to help is not a positive conversation.
+- A question or a calmly reported problem is not negative on its own; that is "neutral".
+- "label" and "sentiment_score" must agree: "negative" scores below 0.5, "positive" above 0.5, "neutral" exactly 0.5, and "mixed" 0.5 unless one side clearly dominates.
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
 }
 
 

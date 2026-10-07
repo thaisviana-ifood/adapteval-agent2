@@ -50,8 +50,11 @@ configurado.
 Gerencia todos os templates de prompt do pipeline (`context_analysis`,
 `rule_generation`, `jury_evaluation` *(órfão — não é chamado por nenhum
 evaluator hoje)*, `metrics_aggregation`, `dynamic_criteria_generation`,
-`llm_evaluation`), com **Langfuse Prompt Management como fonte de verdade**
-e o texto em `_DEFAULT_PROMPTS` (neste arquivo) como fallback/seed.
+`llm_evaluation`, e os três classificadores semânticos
+`semantic_key_phrase_extraction` / `semantic_summary_generation` /
+`semantic_sentiment_classification` — ver `doc/context_analysis.md`), com
+**Langfuse Prompt Management como fonte de verdade** e o texto em
+`_DEFAULT_PROMPTS` (neste arquivo) como fallback/seed.
 
 ⚠️ **Pegadinha importante**: `get_prompt_client(name)` sempre tenta o
 Langfuse primeiro (`langfuse.get_prompt(name, fallback=...)`). Se o prompt

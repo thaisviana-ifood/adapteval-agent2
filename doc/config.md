@@ -18,7 +18,7 @@ projeto) com defaults sensatos. `validate_config()` só checa se
 | `LLM_API_KEY` | via `DEEP_SEEK_API_KEY` | idem |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | idem |
 | `LLM_TEMPERATURE` | `0.7` | idem |
-| `LLM_MAX_TOKENS` | `2048` | idem — **não** é o orçamento usado pelos juízes, ver `JURY_LLM_MAX_TOKENS` |
+| `LLM_MAX_TOKENS` | `2048` | idem — **não** é o orçamento usado pelos juízes nem pelos classificadores do pipeline, ver `JURY_LLM_MAX_TOKENS` e `CLASSIFIER_LLM_MAX_TOKENS` |
 | `LLM_TIMEOUT` | `60` (s) | idem |
 
 ## Júri (`EvaluatorPanel`)
@@ -38,6 +38,24 @@ porque modelos de raciocínio gastam parte do orçamento em tokens de
 raciocínio ocultos antes de escrever o veredito visível — com uma rubrica de
 muitos critérios, um orçamento pequeno pode esgotar em raciocínio e devolver
 texto vazio/cortado (`finish_reason: "length"`). Ver [jury.md](jury.md).
+
+## Classificadores do pipeline
+
+`CLASSIFIER_LLM_MAX_TOKENS` (default `8000`): orçamento dos estágios que não
+são o júri mas também pedem JSON estruturado a um modelo de raciocínio — os
+três classificadores do `SemanticAnalyzer`
+([context_analysis.md](context_analysis.md)) e a geração de critérios
+dinâmicos do `CriteriaGenerator` ([rule_generator.md](rule_generator.md)).
+
+Mesma causa do `JURY_LLM_MAX_TOKENS`, mas com uma falha **silenciosa**: cada
+classificador degrada de forma independente, então um orçamento pequeno não
+levanta erro — devolve o campo vazio e só registra o nome do prompt em
+`classifier_failures`. Medido no `deepseek-v4-pro`, o prompt de key phrases
+gasta ~7.4k tokens de raciocínio numa única conversa, ou seja: com o default
+`LLM_MAX_TOKENS` (2048) ele nunca produzia saída alguma
+(`finish_reason: "length"`, `completion_tokens == reasoning_tokens`, conteúdo
+vazio). O `LLMClient` agora loga um aviso nomeando essa causa sempre que
+`finish_reason == "length"`, em vez de devolver `""` sem explicação.
 
 ## Banco de dados / persistência
 

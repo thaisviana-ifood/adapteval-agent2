@@ -97,6 +97,39 @@ class LLMClient:
         request_kwargs.update(kwargs)
         return request_kwargs
 
+    def _content_of(self, response: Any) -> str:
+        """Pull the message text out of a completion, warning if the budget
+        was exhausted before the model wrote any of it.
+
+        A reasoning model spends hidden reasoning tokens before emitting
+        visible text, so an undersized max_tokens comes back as
+        finish_reason="length" with empty/truncated content rather than as an
+        API error. Callers that only see "" can't tell that apart from a model
+        that genuinely had nothing to say, so name the cause here.
+        """
+        choice = response.choices[0]
+        content = choice.message.content
+
+        if choice.finish_reason == "length":
+            reasoning_tokens = getattr(
+                getattr(response.usage, "completion_tokens_details", None),
+                "reasoning_tokens",
+                None,
+            )
+            logger.warning(
+                f"Model '{self.model}' hit the {self.max_tokens}-token limit "
+                f"before finishing its response"
+                + (
+                    f" ({reasoning_tokens} of them spent on reasoning)"
+                    if reasoning_tokens
+                    else ""
+                )
+                + f"; output is {'empty' if not content else 'truncated'}. "
+                "Raise the max_tokens budget for this stage."
+            )
+
+        return content
+
     def call(
         self,
         prompt: str,
@@ -135,7 +168,7 @@ class LLMClient:
                 logger.debug(
                     f"LLM call successful. Total calls: {self.call_count}"
                 )
-                return response.choices[0].message.content
+                return self._content_of(response)
 
             except openai.RateLimitError as e:
                 wait_time = 2 ** attempt
@@ -196,7 +229,7 @@ class LLMClient:
                 logger.debug(
                     f"Async LLM call successful. Total calls: {self.call_count}"
                 )
-                return response.choices[0].message.content
+                return self._content_of(response)
 
             except openai.RateLimitError as e:
                 wait_time = 2 ** attempt

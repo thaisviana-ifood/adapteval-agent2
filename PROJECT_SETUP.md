@@ -44,7 +44,7 @@ The **Adaptive LLM as a Jury Agent** project foundation has been successfully cr
 
 ### 2. **Context Analysis** (`src/context_analysis/`)
 - **StructuralAnalyzer** - Turn patterns, speaker distribution
-- **SemanticAnalyzer** - Topics, key phrases, sentiment
+- **SemanticAnalyzer** - Topics (TF-IDF), plus key phrases, summary and sentiment via LLM classifiers
 - **ComplexityAnalyzer** - Text readability, vocabulary diversity
 - **IntentAnalyzer** - User intents, assistant objectives
 

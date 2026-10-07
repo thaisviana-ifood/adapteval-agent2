@@ -20,7 +20,10 @@ from src.shared.logger import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
 
-COMMIT_MESSAGE = "v2: explicit output contract, stricter per-criterion scoring"
+COMMIT_MESSAGE = (
+    "v3: add the SemanticAnalyzer classifier prompts "
+    "(key phrases, summary, sentiment)"
+)
 
 
 def main() -> None:

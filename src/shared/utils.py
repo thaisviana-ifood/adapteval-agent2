@@ -1,6 +1,8 @@
 """Utility functions and helpers"""
 
 import json
+import re
+import unicodedata
 from typing import Any, Dict, Optional, List
 from datetime import datetime
 
@@ -25,6 +27,15 @@ def safe_json_dumps(obj: Any, indent: int = 2) -> str:
     except Exception as e:
         logger.error(f"Failed to serialize to JSON: {e}")
         return "{}"
+
+
+def preprocess_text(text: str) -> str:
+    """Lowercase and normalize text (strip diacritics, collapse whitespace)"""
+    text = text.lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def truncate_text(text: str, max_length: int = 100) -> str:

@@ -10,6 +10,7 @@ import json
 import re
 from typing import Dict, Any, List, Optional
 
+from src.config import CLASSIFIER_LLM_MAX_TOKENS
 from src.shared.logger import get_logger
 from src.shared.llm.client import LLMClient
 from src.shared.llm.prompts import PromptManager
@@ -24,7 +25,7 @@ class CriteriaGenerator:
     """Generate evaluation criteria from context and objectives"""
 
     def __init__(self):
-        self.llm_client = LLMClient()
+        self.llm_client = LLMClient(max_tokens=CLASSIFIER_LLM_MAX_TOKENS)
         self.prompt_manager = PromptManager()
 
     def generate(

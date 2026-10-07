@@ -61,6 +61,18 @@ JURY_PROVIDERS: List[Dict[str, str]] = [
 # much larger budget than other pipeline stages need.
 JURY_LLM_MAX_TOKENS: int = int(os.getenv("JURY_LLM_MAX_TOKENS", "8000"))
 
+# The jurors aren't the only stage a reasoning model can starve: every
+# pipeline classifier that asks for structured JSON spends hidden reasoning
+# tokens first, and on an empty budget the API returns
+# finish_reason="length" with EMPTY content -- which each stage then reports
+# as a degraded field rather than an error, so it fails silently. Measured on
+# deepseek-v4-pro, the key-phrase prompt alone spends ~7.4k reasoning tokens
+# on a single conversation, so the default LLM_MAX_TOKENS (2048) never
+# produced any output at all. Give these stages the same headroom as jurors.
+CLASSIFIER_LLM_MAX_TOKENS: int = int(
+    os.getenv("CLASSIFIER_LLM_MAX_TOKENS", "8000")
+)
+
 # Database Configuration
 DB_HOST: str = os.getenv("DB_HOST", "localhost")
 DB_PORT: int = int(os.getenv("DB_PORT", "5432"))
