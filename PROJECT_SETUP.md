@@ -51,7 +51,8 @@ dependency in this project.
 - **ObjectiveDefinition** — success criteria and failure conditions
 - **CriteriaRepository** — the rubric catalog (`evaluation_criteria` table):
   which criteria are mandatory, which belong to a task type or a similar
-  one, and where runtime-created criteria are stored
+  one, where runtime-created criteria are stored, and the reference library
+  of published judge rubrics imported from `data/rubrics/*.csv`
 - **CriteriaGenerator** — assembles one evaluation's boolean rubric from the
   catalog: mandatory + contextual criteria, plus up to 3 LLM-proposed
   dynamic criteria, which are catalogued for reuse

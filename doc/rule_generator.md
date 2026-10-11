@@ -9,7 +9,9 @@ ordem: `TaskClassifier.classify` -> `ObjectiveDefinition.get_objectives` ->
 A rubrica em si não vive no código: ela é lida do catálogo em banco
 (`criteria_store.py` / tabela `evaluation_criteria`), que diz quais
 critérios são obrigatórios, quais se aplicam por tarefa ou por contexto, e
-que recebe os critérios criados dinamicamente quando ainda não existem.
+que recebe os critérios criados dinamicamente quando ainda não existem. O
+mesmo catálogo guarda a biblioteca de 181 rubricas de LLM-as-a-judge
+importada de `data/rubrics/*.csv`.
 
 ## `classifier.py` — `TaskClassifier`
 
@@ -48,17 +50,39 @@ uma linha da tabela `evaluation_criteria` (DDL em
 
 | Coluna | Para quê |
 |---|---|
-| `name` | Identidade do critério no pipeline inteiro (o júri reporta um veredito por `name`) |
-| `description` | A pergunta sim/não que o júri responde (ou a descrição do check, quando heurística) |
-| `criterion_type` | `boolean` = pergunta respondida pelo LLM; `heuristic` = check de código em `heuristics.py`, achado por `name` |
+| `name` | Identidade do critério no pipeline inteiro (o júri reporta um veredito por `name`). Nas rubricas importadas, é o `metrica` do CSV |
+| `description` | A pergunta sim/não que o júri responde (ou a descrição do check, quando heurística). Nas importadas, é o `o_que_avalia` do CSV |
+| `criterion_type` | `boolean` = pergunta respondida pelo LLM; `heuristic` = check de código em `heuristics.py`, achado por `name`; `rubric` = métrica publicada importada do CSV, que traz o próprio prompt e a própria escala |
 | `mandatory` | `true` = entra em **toda** avaliação, qualquer que seja a tarefa |
 | `avg_weight` | Média móvel dos pesos com que o critério já foi aplicado; é esse valor que a próxima rubrica usa como `weight` |
-| `most_common_tasks` | `{task_type: nº de rubricas daquela tarefa que incluíram este critério}` — é por aqui que a seleção por tarefa funciona |
+| `most_common_tasks` | `{task_type: nº de rubricas daquela tarefa que incluíram este critério}` — é por aqui que a seleção por tarefa funciona. Acumulado pelas execuções **deste** pipeline; as tarefas recomendadas pela fonte ficam em `tarefas_indicadas` |
 | `weight_samples` | Quantos pesos a média cobre (sem isso, uma nova amostra só poderia sobrescrever a média, não atualizá-la) |
 
-A unicidade é `(lower(name), criterion_type)`: case-insensitive porque o LLM
-propõe nomes com a capitalização dele, e por tipo porque a heurística
-`relevance` (check de string) não é a pergunta `Relevance` do júri.
+As 9 colunas seguintes são a biblioteca de referência importada de
+`data/rubrics/*.csv` (vazias nos critérios do próprio pipeline), mantidas
+com o nome que têm no CSV: `avaliador` (framework/paper de origem),
+`categoria`, `entradas_necessarias`, `resumo_do_prompt_de_avaliacao`,
+`escala_saida`, `exige_referencia`, `tarefas_indicadas`, `fonte` e
+`prompt_rubrica` (o prompt de juiz pronto que a métrica traz). As duas
+outras colunas do CSV — `metrica` e `o_que_avalia` — **não** são repetidas:
+elas *são* o `name` e o `description` da tabela, e duplicá-las só criaria
+duas colunas obrigadas a ficar iguais.
+
+`init.sql` é `CREATE TABLE IF NOT EXISTS`, então num banco que já existe o
+`CREATE` é no-op e quem adiciona essas colunas são os
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` logo abaixo dele — é a migração,
+aplicada a cada `ensure_schema()` (o projeto não usa ferramenta de
+migration).
+
+A unicidade é `(lower(name), criterion_type, lower(avaliador))`:
+case-insensitive porque o LLM propõe nomes com a capitalização dele; por
+tipo porque a heurística `relevance` (check de string) não é a pergunta
+`Relevance` do júri; e por `avaliador` porque nome de métrica só identifica
+métrica junto com a fonte — a biblioteca tem um `Relevance` da Azure, um da
+Bedrock e um do paper do G-Eval, e nenhum deles é o `Relevance` do
+pipeline (que não tem `avaliador`). Por isso `get_by_name` assume
+`avaliador=""` por default: busca por "Relevance" acha a pergunta do júri,
+nunca uma da biblioteca.
 
 Seleção:
 
@@ -72,7 +96,11 @@ Seleção:
   vezes foram usados na própria tarefa, depois nas similares — então
   critério já estabelecido vem primeiro. Nunca devolve `mandatory`
   (já entram sempre; apareceriam duplicados).
-- `get_by_name(name, criterion_type)` — um critério específico.
+- `get_by_name(name, criterion_type, avaliador)` — um critério específico.
+- `list_all(criterion_type, avaliador, categoria)` — navega o catálogo
+  inteiro ou uma fatia; é como se consulta a biblioteca importada
+  (`list_all(criterion_type="rubric", categoria="RAG")`). `categoria` casa
+  por substring, porque o rótulo costuma ser composto (`Qualidade / RAG`).
 
 Escrita:
 
@@ -85,12 +113,17 @@ Escrita:
   alimenta as estatísticas: incrementa `most_common_tasks[task_type]` (em
   SQL, com `jsonb_set`, para a contagem não se perder com duas avaliações
   simultâneas) e atualiza a média de `avg_weight`.
-- `delete(name, criterion_type)` — aposenta um critério. Por isso o seed só
-  roda em catálogo **vazio**: re-inserir os defaults a cada startup
-  ressuscitaria silenciosamente um critério deletado de propósito, o que
-  faria da tabela um cache em vez da fonte de verdade.
+- `delete(name, criterion_type, avaliador)` — aposenta um critério. Por isso
+  o seed só roda em catálogo **vazio**: re-inserir os defaults a cada
+  startup ressuscitaria silenciosamente um critério deletado de propósito,
+  o que faria da tabela um cache em vez da fonte de verdade.
   `seed_defaults()` (usado por `scripts/dump_criteria.py --seed`) re-aplica
   os defaults faltantes sob demanda.
+- `import_rubrics_csv(directory=None)` — insere só as rubricas de
+  `data/rubrics/*.csv` que ainda não estão catalogadas. Diferente de
+  `seed_defaults`, mexe apenas na biblioteca importada, então dá para
+  carregar um export novo sem re-adicionar critério do pipeline que foi
+  deletado de propósito.
 
 Armazenamento: Postgres (`USE_POSTGRES_CRITERIA`, ligado por default — ver
 [config.md](config.md#banco-de-dados--persistência)). Quando o banco não
@@ -100,11 +133,32 @@ adições até o fim do processo — nenhuma avaliação falha por causa do
 catálogo, ela só deixa de acumular histórico. `is_persistent` diz qual dos
 dois está em uso.
 
-`DEFAULT_CRITERIA` é o seed: todas as rubricas que o código antes
-hard-codava (os 4 critérios base, os 2 por gatilho de contexto, os
-`success_criteria` dos 4 tipos de tarefa de `objectives.py` e as 4
-heurísticas). É a **única** fonte do seed — `init.sql` cria a tabela e não
-insere nada.
+### O que o catálogo vem carregado com
+
+`seed_rows()` = `DEFAULT_CRITERIA` + `load_csv_rubrics()`, **203 linhas**.
+`init.sql` cria a tabela e não insere nada: o seed tem fonte única no
+Python.
+
+- **`DEFAULT_CRITERIA`** (22) — todas as rubricas que o código antes
+  hard-codava: os 4 critérios base, os 2 por gatilho de contexto, os
+  `success_criteria` dos 4 tipos de tarefa de `objectives.py` e as 4
+  heurísticas.
+- **`load_csv_rubrics()`** (181) — a biblioteca de referência: uma linha por
+  métrica publicada de LLM-as-a-judge (DeepEval, Ragas, G-Eval, Azure AI
+  Foundry, Bedrock, Prometheus 2, MT-Bench... 35 avaliadores), com o prompt
+  de juiz que cada uma traz. Lê **todo** `data/rubrics/*.csv` (um export
+  novo entra sem mexer no código), ignora arquivo que não tenha as colunas
+  `metrica`/`o_que_avalia`, pula métrica repetida pelo par
+  `(metrica, avaliador)`, e é parseada uma vez por processo (são ~380KB,
+  quase tudo texto de prompt).
+
+As importadas entram como `criterion_type="rubric"`, não `"boolean"`:
+cada uma tem escala própria (0–1, 1–5, Pass/Fail) e prompt próprio em vez de
+responder a pergunta sim/não do júri. Isso as mantém **catalogadas e
+consultáveis sem entrar automaticamente na rubrica** que o júri recebe —
+`get_mandatory`/`get_for_task` filtram por `boolean`, e as linhas
+importadas não têm contagem em `most_common_tasks`. Para usá-las é uma
+consulta: `list_all(criterion_type="rubric", ...)`.
 
 ## `criteria.py` — `CriteriaGenerator`
 
@@ -195,10 +249,23 @@ defaults em memória — e avisa qual dos dois) e escreve em
 python3 scripts/dump_criteria.py --format markdown
 python3 scripts/dump_criteria.py --format sql --output - | less
 
-# Primeiro insere os defaults faltantes: é como um banco novo ganha a rubrica
+# Insere tudo que falta (DEFAULT_CRITERIA + biblioteca CSV): é como um banco
+# novo ganha o catálogo inteiro
 python3 scripts/dump_criteria.py --seed
+
+# Só a biblioteca CSV (depois de um export novo em data/rubrics/)
+python3 scripts/dump_criteria.py --import-csv
+
+# Navegando a biblioteca
+python3 scripts/dump_criteria.py --criterion-type rubric --categoria RAG \
+    --format markdown --output -
+python3 scripts/dump_criteria.py --avaliador DeepEval --output -
 ```
 
-`--criterion-type boolean|heuristic` filtra por tipo; `--output -` manda
-para stdout. O dump SQL é idempotente (`ON CONFLICT ... DO NOTHING`), então
-pode ser reaplicado sobre um catálogo existente sem sobrescrevê-lo.
+Filtros: `--criterion-type boolean|heuristic|rubric`, `--avaliador`,
+`--categoria` (substring); `--output -` manda para stdout. O dump JSON e o
+SQL levam **todas** as colunas; a tabela Markdown deixa de fora
+`prompt_rubrica` e `resumo_do_prompt_de_avaliacao` e corta célula em 160
+caracteres — prompt de 3 mil caracteres dentro de uma célula não é tabela
+que alguém leia. O dump SQL é idempotente (`ON CONFLICT ... DO NOTHING`),
+então pode ser reaplicado sobre um catálogo existente sem sobrescrevê-lo.

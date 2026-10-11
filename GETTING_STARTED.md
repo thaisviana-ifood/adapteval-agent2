@@ -160,11 +160,14 @@ docker compose up -d postgres
 
 The rubric catalog (`evaluation_criteria`) lives here: stage 2 reads from it
 which criteria are mandatory and which apply to the task at hand, and writes
-back the criteria it creates at runtime. It is created and seeded on first
-use (`USE_POSTGRES_CRITERIA=true`, the default). Inspect it with:
+back the criteria it creates at runtime. It also holds the 181 published
+LLM-as-a-judge rubrics imported from `data/rubrics/*.csv`. It is created and
+seeded on first use (`USE_POSTGRES_CRITERIA=true`, the default). Inspect it
+with:
 
 ```bash
 python3 scripts/dump_criteria.py --format markdown --output -
+python3 scripts/dump_criteria.py --import-csv   # after a new CSV export
 ```
 
 Set `USE_POSTGRES_MEMORY=true` to also persist evaluation history and

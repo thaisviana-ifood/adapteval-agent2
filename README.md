@@ -61,15 +61,21 @@ docker compose up -d postgres
 Stage 2 reads its rubric from the `evaluation_criteria` table: which
 criteria are mandatory, which apply to a given (or similar) task type, and
 the criteria earlier runs invented. Criteria created at runtime are written
-back, so the rubric accumulates instead of being reinvented per call — see
-[`doc/rule_generator.md`](doc/rule_generator.md). The table is created and
-seeded automatically on first use (`USE_POSTGRES_CRITERIA`, on by default);
-without a reachable database the same seed rubric is served from memory and
-runtime additions are dropped at exit.
+back, so the rubric accumulates instead of being reinvented per call. The
+same table holds a reference library of 181 published LLM-as-a-judge
+metrics imported from [`data/rubrics/`](data/rubrics/) (DeepEval, Ragas,
+G-Eval, Azure AI Foundry, …), each with the judge prompt and output scale it
+ships with — see [`doc/rule_generator.md`](doc/rule_generator.md). The table
+is created and seeded automatically on first use (`USE_POSTGRES_CRITERIA`,
+on by default); without a reachable database the same seed is served from
+memory and runtime additions are dropped at exit.
 
 ```bash
-# Inspect the current rubric (JSON, Markdown table, or replayable SQL)
+# Inspect the catalog (JSON, Markdown table, or replayable SQL)
 python3 scripts/dump_criteria.py --format markdown --output -
+
+# Browse the imported library
+python3 scripts/dump_criteria.py --criterion-type rubric --categoria RAG --output -
 ```
 
 Set `USE_POSTGRES_MEMORY=true` in `.env` to also persist evaluation history

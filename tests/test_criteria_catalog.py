@@ -1,8 +1,9 @@
 """Tests for the rubric catalog and the criteria generation that reads it
 
 Every test runs the catalog with `enabled=False`, i.e. on its in-process
-backend seeded with DEFAULT_CRITERIA: the behaviour under test is the
-selection logic, which is identical on both backends, and no test should
+backend seeded with the same rows a fresh database gets (DEFAULT_CRITERIA
+plus the imported `data/rubrics/*.csv` library): the behaviour under test is
+the selection logic, which is identical on both backends, and no test should
 need a PostgreSQL server.
 """
 
@@ -11,9 +12,12 @@ import pytest
 from src.rule_generator.criteria import CriteriaGenerator
 from src.rule_generator.criteria_store import (
     BOOLEAN,
+    CSV_COLUMNS,
     DEFAULT_CRITERIA,
     HEURISTIC,
+    RUBRIC,
     CriteriaRepository,
+    load_csv_rubrics,
     related_tasks,
 )
 from src.rule_generator.heuristics import HeuristicChecker
@@ -30,9 +34,11 @@ class TestCriteriaRepository:
     """The catalog itself"""
 
     def test_seeds_every_default_criterion(self, repository):
+        # The pipeline's own criteria are the rows with no avaliador; the
+        # rest of the catalog is the imported library (TestRubricLibrary).
         catalogued = {
             (row["name"], row["criterion_type"])
-            for row in repository.list_all()
+            for row in repository.list_all(avaliador="")
         }
         assert catalogued == {
             (row["name"], row["criterion_type"]) for row in DEFAULT_CRITERIA
@@ -136,6 +142,83 @@ class TestCriteriaRepository:
             [{"name": "Not In Catalog", "weight": 1.0}], "general"
         )
         assert repository.get_by_name("Not In Catalog") is None
+
+
+class TestRubricLibrary:
+    """The rubrics imported from data/rubrics/*.csv"""
+
+    def test_every_csv_rubric_is_catalogued(self, repository):
+        rubrics = repository.list_all(criterion_type=RUBRIC)
+
+        assert len(rubrics) == len(load_csv_rubrics())
+        assert all(row["avaliador"] for row in rubrics)
+        assert all(row["prompt_rubrica"] for row in rubrics)
+
+    def test_every_csv_column_is_kept(self, repository):
+        g_eval = repository.get_by_name("G-Eval", RUBRIC, "DeepEval")
+
+        # metrica/o_que_avalia are this table's name/description; the other
+        # nine CSV columns are stored verbatim.
+        assert g_eval["description"]
+        for column in CSV_COLUMNS:
+            assert g_eval[column], f"{column} was dropped on import"
+        assert g_eval["escala_saida"].startswith("0–1")
+        assert g_eval["fonte"].startswith("https://")
+
+    def test_a_metric_name_is_scoped_by_its_framework(self, repository):
+        # Three frameworks publish a "Relevance", and none of them is the
+        # jury's own Relevance question.
+        azure = repository.get_by_name("Relevance", RUBRIC, "Azure AI Foundry")
+        bedrock = repository.get_by_name(
+            "Relevance", RUBRIC, "Amazon Bedrock Evaluations"
+        )
+        own = repository.get_by_name("Relevance", BOOLEAN)
+
+        assert azure["escala_saida"] != bedrock["escala_saida"]
+        assert own["mandatory"] is True
+        assert own["avaliador"] == ""
+
+    def test_the_library_is_not_applied_to_evaluations(self, repository):
+        # It is a reference library: catalogued and queryable, but the
+        # jury's rubric is the boolean criteria only.
+        assert not any(
+            row["criterion_type"] == RUBRIC
+            for row in repository.get_mandatory(BOOLEAN)
+        )
+        assert not any(
+            row["criterion_type"] == RUBRIC
+            for row in repository.get_for_task("question_answering", BOOLEAN)
+        )
+
+    def test_filters_narrow_the_library(self, repository):
+        deepeval = repository.list_all(
+            criterion_type=RUBRIC, avaliador="DeepEval"
+        )
+        assert deepeval
+        assert {row["avaliador"] for row in deepeval} == {"DeepEval"}
+
+        # categoria is a compound label ("Qualidade / RAG"), so it matches
+        # as a substring.
+        rag = repository.list_all(criterion_type=RUBRIC, categoria="RAG")
+        assert rag
+        assert all("rag" in row["categoria"].lower() for row in rag)
+
+    def test_import_is_idempotent(self, repository):
+        before = len(repository.list_all())
+
+        assert repository.import_rubrics_csv() == 0
+        assert len(repository.list_all()) == before
+
+    def test_import_adds_rubrics_missing_from_the_catalog(self, repository):
+        assert repository.delete("G-Eval", RUBRIC, "DeepEval")
+
+        assert repository.import_rubrics_csv() == 1
+        assert repository.get_by_name("G-Eval", RUBRIC, "DeepEval")
+
+    def test_a_csv_without_the_expected_columns_is_skipped(self, tmp_path):
+        (tmp_path / "not_rubrics.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+
+        assert load_csv_rubrics(tmp_path, refresh=True) == []
 
 
 class TestCriteriaGenerator:

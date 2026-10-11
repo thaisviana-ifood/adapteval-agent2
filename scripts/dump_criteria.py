@@ -1,10 +1,17 @@
 """Dump the criteria catalog (the `evaluation_criteria` table)
 
 Reads the rubric catalog the pipeline uses -- from PostgreSQL when it is
-reachable, otherwise from the in-process defaults -- and writes it as JSON,
-as a Markdown table, or as the SQL inserts needed to load it into another
-database. `--seed` first applies any DEFAULT_CRITERIA row the catalog is
-missing, which is how a fresh database gets its rubric.
+reachable, otherwise from the in-process seed -- and writes it as JSON, as a
+Markdown table, or as the SQL inserts needed to load it into another
+database.
+
+Two ways to fill a catalog:
+
+* `--seed` applies every missing seed row: the pipeline's own
+  DEFAULT_CRITERIA *and* the rubric library in `data/rubrics/*.csv`. This is
+  how a fresh database gets its rubric.
+* `--import-csv [DIR]` applies only the CSV library, so a new export can be
+  loaded without re-adding a pipeline criterion that was deleted on purpose.
 """
 
 import argparse
@@ -16,12 +23,38 @@ from typing import Any, Dict, List
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import OUTPUT_DATA_DIR  # noqa: E402
-from src.rule_generator.criteria_store import CriteriaRepository  # noqa: E402
+from src.rule_generator.criteria_store import (  # noqa: E402
+    BOOLEAN,
+    CSV_COLUMNS,
+    HEURISTIC,
+    RUBRIC,
+    RUBRICS_CSV_DIR,
+    CriteriaRepository,
+)
 from src.shared.logger import get_logger  # noqa: E402
 
 logger = get_logger(__name__)
 
 EXTENSIONS = {"json": "json", "markdown": "md", "sql": "sql"}
+
+# Columns of the Markdown table. The full row (including `prompt_rubrica`,
+# which is a whole judge prompt) only makes sense in the JSON and SQL
+# dumps -- a Markdown cell with 3,000 characters of prompt in it is not a
+# table anyone can read.
+MARKDOWN_COLUMNS = (
+    "name",
+    "description",
+    "criterion_type",
+    "mandatory",
+    "avg_weight",
+    "most_common_tasks",
+    "avaliador",
+    "categoria",
+    "escala_saida",
+    "exige_referencia",
+    "tarefas_indicadas",
+)
+MARKDOWN_MAX_CELL = 160
 
 
 def _tasks_cell(row: Dict[str, Any]) -> str:
@@ -37,23 +70,34 @@ def as_json(rows: List[Dict[str, Any]]) -> str:
     return json.dumps(rows, indent=2, ensure_ascii=False, default=str)
 
 
+def _markdown_cell(row: Dict[str, Any], column: str) -> str:
+    if column == "most_common_tasks":
+        value = _tasks_cell(row)
+    elif column == "mandatory":
+        value = "yes" if row["mandatory"] else "no"
+    elif column == "avg_weight":
+        value = f"{float(row['avg_weight']):.2f}"
+    else:
+        value = str(row.get(column) or "")
+
+    value = " ".join(value.split()).replace("|", "\\|")
+    if len(value) > MARKDOWN_MAX_CELL:
+        value = value[: MARKDOWN_MAX_CELL - 1].rstrip() + "…"
+    return value or "-"
+
+
 def as_markdown(rows: List[Dict[str, Any]]) -> str:
     lines = [
-        "| name | description | criterion_type | mandatory | avg_weight "
-        "| most_common_tasks |",
-        "|---|---|---|---|---|---|",
+        "| " + " | ".join(MARKDOWN_COLUMNS) + " |",
+        "|" + "---|" * len(MARKDOWN_COLUMNS),
     ]
     for row in rows:
         lines.append(
-            "| {name} | {description} | {criterion_type} | {mandatory} "
-            "| {avg_weight:.2f} | {tasks} |".format(
-                name=row["name"],
-                description=row["description"].replace("|", "\\|"),
-                criterion_type=row["criterion_type"],
-                mandatory="yes" if row["mandatory"] else "no",
-                avg_weight=float(row["avg_weight"]),
-                tasks=_tasks_cell(row),
+            "| "
+            + " | ".join(
+                _markdown_cell(row, column) for column in MARKDOWN_COLUMNS
             )
+            + " |"
         )
     return "\n".join(lines)
 
@@ -73,28 +117,37 @@ def as_sql(rows: List[Dict[str, Any]]) -> str:
         text = value if isinstance(value, str) else json.dumps(value)
         return "'" + text.replace("'", "''") + "'"
 
+    columns = (
+        "name",
+        "description",
+        "criterion_type",
+        "mandatory",
+        "avg_weight",
+        "most_common_tasks",
+        "weight_samples",
+        *CSV_COLUMNS,
+    )
     statements = [
         "-- Dump of evaluation_criteria "
         "(see docker/postgres/init.sql for the schema)"
     ]
     for row in rows:
+        values = [
+            literal(row["name"]),
+            literal(row["description"]),
+            literal(row["criterion_type"]),
+            literal(bool(row["mandatory"])),
+            literal(float(row["avg_weight"])),
+            literal(json.dumps(row.get("most_common_tasks") or {})) + "::jsonb",
+            literal(int(row.get("weight_samples", 1))),
+            *(literal(row.get(column) or "") for column in CSV_COLUMNS),
+        ]
         statements.append(
-            "INSERT INTO evaluation_criteria (name, description, "
-            "criterion_type, mandatory, avg_weight, most_common_tasks, "
-            "weight_samples) VALUES ({values})\n"
-            "    ON CONFLICT (lower(name), criterion_type) DO NOTHING;".format(
-                values=", ".join(
-                    [
-                        literal(row["name"]),
-                        literal(row["description"]),
-                        literal(row["criterion_type"]),
-                        literal(bool(row["mandatory"])),
-                        literal(float(row["avg_weight"])),
-                        literal(json.dumps(row.get("most_common_tasks") or {}))
-                        + "::jsonb",
-                        literal(int(row.get("weight_samples", 1))),
-                    ]
-                )
+            "INSERT INTO evaluation_criteria ({columns})\n"
+            "    VALUES ({values})\n"
+            "    ON CONFLICT (lower(name), criterion_type, lower(avaliador))"
+            " DO NOTHING;".format(
+                columns=", ".join(columns), values=", ".join(values)
             )
         )
     return "\n".join(statements) + "\n"
@@ -115,15 +168,39 @@ def main() -> None:
     )
     parser.add_argument(
         "--criterion-type",
-        choices=["boolean", "heuristic"],
-        help="Dump only criteria of this type (default: all)",
+        choices=[BOOLEAN, HEURISTIC, RUBRIC],
+        help=(
+            f"Dump only criteria of this type (default: all); "
+            f"{RUBRIC!r} is the imported CSV library"
+        ),
+    )
+    parser.add_argument(
+        "--avaliador",
+        help="Dump only rubrics from this framework (e.g. DeepEval, Ragas)",
+    )
+    parser.add_argument(
+        "--categoria",
+        help="Dump only rubrics whose categoria contains this text (e.g. RAG)",
     )
     parser.add_argument(
         "--seed",
         action="store_true",
         help=(
-            "Insert any missing DEFAULT_CRITERIA row before dumping, so a "
-            "fresh database ends up with the full rubric"
+            "Insert every missing seed row (DEFAULT_CRITERIA plus the CSV "
+            "rubric library) before dumping, so a fresh database ends up "
+            "with the full catalog"
+        ),
+    )
+    parser.add_argument(
+        "--import-csv",
+        nargs="?",
+        type=Path,
+        const=RUBRICS_CSV_DIR,
+        metavar="DIR",
+        help=(
+            f"Import only the rubric library from the CSVs in DIR "
+            f"(default: {RUBRICS_CSV_DIR.relative_to(RUBRICS_CSV_DIR.parents[1])})"
+            f" before dumping"
         ),
     )
     parser.add_argument(
@@ -140,9 +217,15 @@ def main() -> None:
     try:
         if args.seed:
             inserted = repository.seed_defaults()
-            logger.info(f"Seeded {inserted} missing default criteria")
+            logger.info(f"Seeded {inserted} missing criteria")
+        if args.import_csv:
+            repository.import_rubrics_csv(args.import_csv)
 
-        rows = repository.list_all(criterion_type=args.criterion_type)
+        rows = repository.list_all(
+            criterion_type=args.criterion_type,
+            avaliador=args.avaliador,
+            categoria=args.categoria,
+        )
         if not repository.is_persistent:
             logger.warning(
                 "Dumping the in-memory catalog: PostgreSQL was not "

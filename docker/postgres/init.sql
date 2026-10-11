@@ -8,29 +8,70 @@
 --     context trigger evaluated in the rule generator;
 --   * criteria the LLM invents at runtime are inserted here, so the next
 --     evaluation of the same (or a similar) task can reuse them.
--- Seed rows are not written here: they live in DEFAULT_CRITERIA in
--- criteria_store.py and are applied by CriteriaRepository.seed_defaults(),
--- so the catalog has a single source of truth.
+-- The last five columns are the reference library imported from
+-- data/rubrics/*.csv (one row per published LLM-as-a-judge metric, with the
+-- judge prompt it ships with); they are empty for the pipeline's own
+-- criteria. The CSV's `metrica` and `o_que_avalia` are not repeated as
+-- columns of their own: they ARE this table's `name` and `description`.
+-- Seed rows are not written here: they live in DEFAULT_CRITERIA (and the
+-- CSV) and are applied by CriteriaRepository.seed_defaults(), so the
+-- catalog has a single source of truth.
 CREATE TABLE IF NOT EXISTS evaluation_criteria (
     id SERIAL PRIMARY KEY,
+    -- The CSV's `metrica` for imported rows.
     name VARCHAR(255) NOT NULL,
+    -- The CSV's `o_que_avalia` for imported rows.
     description TEXT NOT NULL,
     -- "boolean": a yes/no question answered by the LLM jury.
     -- "heuristic": a code check in src/rule_generator/heuristics.py, looked
     -- up by `name` (no LLM call).
+    -- "rubric": a published metric imported from the CSV library, which
+    -- brings its own judge prompt and its own output scale (see
+    -- prompt_rubrica / escala_saida) instead of answering yes/no.
     criterion_type VARCHAR(64) NOT NULL DEFAULT 'boolean',
     mandatory BOOLEAN NOT NULL DEFAULT FALSE,
     avg_weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     -- {task_type: how many rubrics for that task included this criterion},
     -- so the generator can offer the criteria a task usually needs, most
-    -- common first.
+    -- common first. Accumulated by this pipeline's own runs -- the CSV's
+    -- recommended tasks are editorial, and live in tarefas_indicadas.
     most_common_tasks JSONB NOT NULL DEFAULT '{}'::jsonb,
     -- How many weights avg_weight averages over. Without it a new sample
     -- could only overwrite the average, never update it.
     weight_samples INTEGER NOT NULL DEFAULT 1,
+    -- Framework/paper the metric comes from ("DeepEval", "Ragas", ...).
+    -- Empty for criteria this pipeline defines itself.
+    avaliador VARCHAR(255) NOT NULL DEFAULT '',
+    categoria VARCHAR(255) NOT NULL DEFAULT '',
+    -- What the judge must be given (input, actual_output, context, ...).
+    entradas_necessarias TEXT NOT NULL DEFAULT '',
+    resumo_do_prompt_de_avaliacao TEXT NOT NULL DEFAULT '',
+    -- The metric's own output scale ("0-1", "1-5", "Pass/Fail", ...).
+    escala_saida VARCHAR(255) NOT NULL DEFAULT '',
+    exige_referencia VARCHAR(255) NOT NULL DEFAULT '',
+    -- Tasks the source recommends the metric for, in its own words.
+    tarefas_indicadas TEXT NOT NULL DEFAULT '',
+    fonte TEXT NOT NULL DEFAULT '',
+    -- The ready-to-use judge prompt shipped with the metric.
+    prompt_rubrica TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Catalogs created before the CSV library existed are migrated here: the
+-- table above is CREATE ... IF NOT EXISTS, so on an existing database it is
+-- a no-op and these ALTERs are what actually add the columns.
+ALTER TABLE evaluation_criteria
+    ADD COLUMN IF NOT EXISTS avaliador VARCHAR(255) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS categoria VARCHAR(255) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS entradas_necessarias TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS resumo_do_prompt_de_avaliacao TEXT NOT NULL
+        DEFAULT '',
+    ADD COLUMN IF NOT EXISTS escala_saida VARCHAR(255) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS exige_referencia VARCHAR(255) NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS tarefas_indicadas TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS fonte TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS prompt_rubrica TEXT NOT NULL DEFAULT '';
 
 -- Criteria are identified by name across the pipeline (the jury reports one
 -- verdict per name), and the LLM proposes names with its own casing, so
@@ -38,12 +79,19 @@ CREATE TABLE IF NOT EXISTS evaluation_criteria (
 -- criterion_type is part of the key because the two types are different
 -- things with their own namespaces: the `relevance` heuristic (a string
 -- check) is not the `Relevance` rubric question the jury answers.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluation_criteria_name_lower
-    ON evaluation_criteria (lower(name), criterion_type);
+-- avaliador is part of it because a metric name only identifies a metric
+-- together with its source: the library has a `Relevance` from Azure, one
+-- from Bedrock and one from the G-Eval paper, none of which is this
+-- pipeline's own `Relevance` (which has no avaliador at all).
+DROP INDEX IF EXISTS idx_evaluation_criteria_name_lower;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluation_criteria_identity
+    ON evaluation_criteria (lower(name), criterion_type, lower(avaliador));
 CREATE INDEX IF NOT EXISTS idx_evaluation_criteria_mandatory
     ON evaluation_criteria (mandatory);
 CREATE INDEX IF NOT EXISTS idx_evaluation_criteria_tasks
     ON evaluation_criteria USING gin (most_common_tasks);
+CREATE INDEX IF NOT EXISTS idx_evaluation_criteria_categoria
+    ON evaluation_criteria (categoria);
 
 CREATE TABLE IF NOT EXISTS evaluation_history (
     id SERIAL PRIMARY KEY,

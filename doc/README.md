@@ -66,8 +66,9 @@ salva um snapshot do estado após cada nó.
   goldenset. Uma chamada de LLM por utterance, então use `--limit`/
   `--workers`.
 - **`scripts/dump_criteria.py`** — dumpa o catálogo de rubricas (tabela
-  `evaluation_criteria`) em JSON, tabela Markdown ou SQL, e com `--seed`
-  carrega as rubricas padrão num banco novo. Ver
+  `evaluation_criteria`) em JSON, tabela Markdown ou SQL; com `--seed`
+  carrega num banco novo os critérios padrão **e** a biblioteca de rubricas
+  de `data/rubrics/*.csv`, e com `--import-csv` só a biblioteca. Ver
   [rule_generator.md](rule_generator.md#dump-do-catálogo--scriptsdump_criteriapy).
 - **`scripts/convert_multiturn_csv.py`** — converte o CSV multi-turn do
   Kaggle (colunas `P1,R1,...,P5`) para o schema de dataset JSON que
