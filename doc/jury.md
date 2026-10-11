@@ -14,9 +14,19 @@ Interface: `evaluate(response, criteria, context) -> Dict` e `get_name()`.
 ### `LLMEvaluator` — juiz genérico via chat completion
 
 Usado para qualquer provider de `JURY_PROVIDERS` exceto `typesafe` (hoje:
-DeepSeek e OpenAI). Um `LLMClient` próprio por instância, com
-`max_tokens=JURY_LLM_MAX_TOKENS` (bem maior que o padrão do resto do
-pipeline — ver seção "Pegadinha: tokens de raciocínio" abaixo).
+DeepSeek e OpenAI). Um `LLMClient` próprio por instância, construído com:
+
+- `max_tokens=JURY_LLM_MAX_TOKENS` (default `8000`, bem maior que o
+  `LLM_MAX_TOKENS` do resto do pipeline: modelos de raciocínio gastam parte
+  do orçamento em tokens ocultos antes de escrever o veredito — ver
+  [config.md](config.md#júri-evaluatorpanel));
+- **`fallbacks=()`** — ao contrário de todo outro `LLMClient` do projeto, o
+  juiz **não** tem cadeia de fallback entre providers. Um jurado que
+  respondesse silenciosamente com o modelo de outro vendor quebraria a única
+  propriedade em que o painel se sustenta (um provider por jurado, nenhum
+  vendor se avaliando). Se o provider de um juiz estiver fora, ele some da
+  votação (ver `_vote_on_criterion`: quem não vota não conta), em vez de ser
+  personificado pelo vizinho.
 
 - `_build_eval_prompt`: monta `criteria_text` (`"- Nome: descrição"` por
   critério) e chama o template Langfuse `llm_evaluation` (ver
@@ -73,12 +83,19 @@ com `MIN_EVALUATORS=3`).
 
 `evaluate(response, criteria, context)`:
 
-1. Chama `evaluator.evaluate(...)` em cada juiz, coleta a lista bruta em
-   `evaluations`.
+1. Chama `evaluator.evaluate(...)` em **todos os juízes em paralelo**, num
+   `ThreadPoolExecutor` com uma thread por juiz, e coleta a lista bruta em
+   `evaluations`. Os juízes são independentes (cada um responde a rubrica
+   inteira sozinho, e a votação abaixo é indexada por nome de juiz), e
+   passam quase todo o tempo esperando uma chamada HTTP — então a latência
+   do painel deixa de ser a soma dos juízes e passa a ser a do juiz mais
+   lento. `pool.map` preserva a ordem dos providers, de modo que a lista
+   `evaluations` (que vai pra saída final) continua estável entre runs.
 2. Para cada critério distinto em `criteria["weighted_criteria"]`, chama
    `_vote_on_criterion(nome, evaluations)`.
-3. Agrega: `passed_count`, `criteria_count`, `pass_rate = passed_count/criteria_count`,
-   `confidence` (média da confiança de cada veredito de critério).
+3. Agrega: `panel_size`, `passed_count`, `criteria_count`,
+   `pass_rate = passed_count/criteria_count`, `confidence` (média da
+   confiança de cada veredito de critério).
 4. Inclui `average_score = pass_rate * 10` — **isto é só um número de
    compatibilidade** para os consumidores que ainda esperam uma nota 0-10
    (`FinalScoreCalculator`, `AccuracyCalculator`, `HumanInTheLoop`); não é
@@ -93,15 +110,23 @@ com `MIN_EVALUATORS=3`).
 - Lado com mais votos (`True` vs `False`) vence; a confiança do critério é
   a média da confiança **só dos juízes concordantes** (o lado vencedor) —
   um juiz dissidente não pesa na confiança do veredito.
+- A confiança de cada juiz é lida de `criterion_confidences[criterio]`
+  quando o juiz publica isso (só o `TypesafeEvaluator`, pela distância do
+  `noul` até 0.5); caso contrário cai no `confidence` geral do juiz. Sem
+  essa preferência, todos os critérios de um mesmo juiz ficariam achatados
+  no mesmo número.
+- `agreement` no resultado do critério diz se **todos** os juízes que
+  votaram ficaram do lado vencedor (`len(concordant) == len(votes)`), não se
+  o painel inteiro votou.
 - **Empate exato → falha fechado** (`passed=False`, `concordant=[]`,
   `confidence=0.0`): sem maioria real, o critério é tratado como não
   satisfeito em vez de escolher um lado arbitrariamente.
 
 ```mermaid
 flowchart TD
-    R[response + criteria + context] --> D[LLMEvaluator: DeepSeek]
-    R --> O[LLMEvaluator: OpenAI]
-    R --> T[TypesafeEvaluator]
+    R[response + criteria + context] -->|thread| D[LLMEvaluator: DeepSeek]
+    R -->|thread| O[LLMEvaluator: OpenAI]
+    R -->|thread| T[TypesafeEvaluator]
     D -->|verdicts por critério| V[_vote_on_criterion por critério]
     O -->|verdicts por critério| V
     T -->|verdicts por critério| V

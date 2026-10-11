@@ -9,7 +9,10 @@ critério totalmente alinhado — na verdade ele **usa o mesmo
 mudanças de rubrica booleana, mas o resto da classe segue a estrutura antiga
 "nota 0-10 direto".
 
-Só é referenciado por `example_usage.py` na raiz do projeto.
+Fora dele mesmo, só é referenciado por `example_usage.py` na raiz do
+projeto. O arquivo também tem um `main()` sob `if __name__ == "__main__"`
+(uma avaliação de demonstração com conversa fixa), que é o que roda em
+`python3 -m src.main`.
 
 ## Estrutura
 

@@ -52,7 +52,12 @@ critério em vez de dar uma nota holística — ver [jury.md](jury.md)).
    `success_criteria` de `general` viram 3 critérios extras).
 3. **`_generate_dynamic_criteria`**: **essa é a única parte do módulo que
    chama LLM** — usa o prompt `dynamic_criteria_generation` (gerenciado via
-   `PromptManager`/Langfuse) para o modelo propor até 3 critérios extras
+   `PromptManager`/Langfuse), com o cliente construído com
+   `max_tokens=CLASSIFIER_LLM_MAX_TOKENS` (não o `LLM_MAX_TOKENS` default:
+   é um prompt que pede JSON a um modelo de raciocínio e com orçamento
+   pequeno devolvia resposta vazia — ver
+   [config.md](config.md#classificadores-do-pipeline)), para o modelo propor
+   até 3 critérios extras
    específicos do contexto, sem duplicar os já existentes. Parseia um array
    JSON da resposta (`_parse_dynamic_criteria`); qualquer erro de parse ou
    falha de chamada resulta em lista vazia (fail-open, não quebra o

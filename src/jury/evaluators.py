@@ -2,6 +2,7 @@
 
 from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 
 from src.config import JURY_LLM_MAX_TOKENS, JURY_PROVIDERS
 from src.shared.logger import get_logger
@@ -472,13 +473,25 @@ class EvaluatorPanel:
             Combined panel evaluation: a verdict per criterion, plus the
             resulting pass rate (fraction of criteria that passed the vote)
         """
-        evaluations = []
-
-        for evaluator in self.evaluators:
-            evaluation = evaluator.evaluate(
-                response, criteria, context
+        # Jurors are independent -- each one answers the whole rubric on its
+        # own and the vote below is keyed by juror name, so nothing here
+        # depends on them running in sequence. They're also almost entirely
+        # waiting on one provider's HTTP call, so running them on threads
+        # collapses the panel's latency from the sum of the jurors' to the
+        # slowest juror's. `map` preserves provider order, keeping the
+        # `evaluations` list (which is reported) stable across runs.
+        with ThreadPoolExecutor(
+            max_workers=len(self.evaluators) or 1,
+            thread_name_prefix="juror",
+        ) as pool:
+            evaluations = list(
+                pool.map(
+                    lambda evaluator: evaluator.evaluate(
+                        response, criteria, context
+                    ),
+                    self.evaluators,
+                )
             )
-            evaluations.append(evaluation)
 
         criterion_names: List[str] = []
         seen = set()

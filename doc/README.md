@@ -54,6 +54,23 @@ salva um snapshot do estado após cada nó.
 - **`src/main.py`** (`AdaptiveJuryAgent`) — implementação legada e paralela,
   não orquestrada por LangGraph. Ver [legacy_main.md](legacy_main.md).
 
+### Scripts auxiliares (não rodam o pipeline inteiro)
+
+- **`scripts/run_context_analysis.py`** / **`scripts/run_intent_analysis.py`**
+  — rodam só o estágio 1 (`ContextAnalyzer` completo, ou só o
+  `IntentAnalyzer`) sobre um dataset, para inspecionar a análise de contexto
+  sem pagar o custo do júri. Ver [context_analysis.md](context_analysis.md).
+- **`scripts/eval_intent_accuracy.py`** — mede a acurácia do
+  `IntentAnalyzer` contra os goldensets Bitext (27 intents de atendimento),
+  construindo o analisador em modo closed-set sobre a própria taxonomia do
+  goldenset. Uma chamada de LLM por utterance, então use `--limit`/
+  `--workers`.
+- **`scripts/convert_multiturn_csv.py`** — converte o CSV multi-turn do
+  Kaggle (colunas `P1,R1,...,P5`) para o schema de dataset JSON que
+  `run_deep_agent.py` espera.
+- **`scripts/push_prompts_to_langfuse.py`** — publica os templates locais de
+  `src/shared/llm/prompts.py` no Langfuse. Ver [shared.md](shared.md).
+
 ## Saída estruturada
 
 Toda avaliação produz um `EvaluationOutput` (`src/agent/schema.py`) com três
@@ -76,6 +93,12 @@ partes:
   pergunta sim/não) é respondido True/False por cada juiz; o painel decide
   o veredito de cada critério por maioria dos juízes que responderam
   (empate fecha em False). Ver [jury.md](jury.md).
+- **Os juízes rodam em paralelo, e sem rede de proteção.** O
+  `EvaluatorPanel` dispara os juízes num `ThreadPoolExecutor` (um por
+  provider), então a latência do estágio 3 é a do juiz mais lento, não a
+  soma. E cada juiz é construído com `fallbacks=()`: diferente do resto do
+  pipeline, um provider fora do ar faz o juiz **sair da votação** em vez de
+  cair no modelo de outro vendor. Ver [jury.md](jury.md).
 - **Prompts são gerenciados pelo Langfuse**, não só pelo texto em
   `src/shared/llm/prompts.py`: uma vez publicado lá, a versão do Langfuse
   tem prioridade sobre o default local. Editar o texto em `prompts.py` não

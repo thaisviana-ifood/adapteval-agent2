@@ -15,11 +15,16 @@ conversational agent. Runs and traces are observed with
 2. **Gerador de Regras** (`src/rule_generator`) — classifies the task,
    defines objectives, generates evaluation criteria, and runs heuristic
    checks.
-3. **LLM as a Jury** (`src/jury`) — a panel of LLM evaluators scores the
-   response against the generated criteria; low-confidence results are
-   flagged for human-in-the-loop review.
-4. **Agregação das métricas** (`src/metrics`) — combines jury, heuristic and
-   accuracy scores into a final score, confidence, and consolidation report.
+3. **LLM as a Jury** (`src/jury`) — a panel of jurors, one per configured
+   provider (DeepSeek, OpenAI, Typesafe), answers every rubric criterion
+   True/False; the panel's verdict per criterion is a majority vote among
+   the jurors that answered it. Jurors run in parallel, and low-confidence
+   results are flagged for human-in-the-loop review.
+4. **Agregação das métricas** (`src/metrics`) — combines the jury pass rate,
+   heuristic and accuracy scores plus a complexity adjustment into a final
+   weighted score, confidence, and consolidation report.
+
+Per-module documentation (in Portuguese) lives in [`doc/`](doc/README.md).
 
 Each stage is a node in the graph built by
 [`src/agent/pipeline_graph.py`](src/agent/pipeline_graph.py)
@@ -36,8 +41,16 @@ pipeline.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # fill in DEEP_SEEK_API_KEY and, optionally, Langfuse keys
+cp .env.example .env
 ```
+
+`DEEP_SEEK_API_KEY` is the minimum: it powers the pipeline's own LLM calls
+and the conversational front-end. The jury panel defaults to three providers
+(`JURY_PROVIDERS` in [`src/config.py`](src/config.py)), so a full jury run
+also needs `OPEN_AI_API_KEY` and the `TYPESAFE_*` keys — a juror whose
+provider is missing drops out of the vote rather than falling back to
+another vendor's model. Langfuse keys are optional; without them tracing and
+prompt management degrade to local-only behavior.
 
 ### PostgreSQL (optional, for persistent memory)
 
@@ -62,6 +75,19 @@ python3 scripts/run_deep_agent.py --use-agent  # go through the deepagents front
 # Context/intent analysis only
 python3 scripts/run_context_analysis.py --dataset data/raw/diana-agent-csat.json
 python3 scripts/run_intent_analysis.py --dataset data/raw/diana-agent-csat.json
+
+# Measure IntentAnalyzer accuracy against the Bitext goldensets (one LLM
+# call per utterance -- keep --limit small)
+python3 scripts/eval_intent_accuracy.py --limit 300
+python3 scripts/eval_intent_accuracy.py --limit 1080 --workers 12
+
+# Convert the Kaggle multi-turn CSV export into the dataset JSON schema
+# (both paths optional; defaults to the Multi-Turn CSV in data/raw/)
+python3 scripts/convert_multiturn_csv.py [input.csv] [output.json]
+
+# Publish local prompt templates to Langfuse (required for prompts.py edits
+# to take effect -- the Langfuse version wins over the local default)
+python3 scripts/push_prompts_to_langfuse.py
 ```
 
 Results are written incrementally to `data/output/`.

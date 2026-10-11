@@ -1,644 +1,452 @@
-# Agents Architecture & Extension Guide
+# Jury Architecture & Extension Guide
 
-This document describes the agent system in the Adaptive LLM Jury Agent framework and how to extend it with custom evaluators.
+How the jury panel works and how to add a juror to it. Everything described
+here lives in [`src/jury/evaluators.py`](src/jury/evaluators.py); the
+Portuguese module documentation is in [`doc/jury.md`](doc/jury.md).
 
 ## Overview
 
-The Adaptive Jury Agent uses a **multi-evaluator panel** system where independent LLM agents assess responses according to context-aware criteria. The framework is designed for extensibility - you can add new evaluator types, customize evaluation logic, and integrate specialized assessment strategies.
+Stage 3 of the pipeline is a **multi-vendor panel**: one juror per
+configured LLM provider, so no vendor's model is the sole grader of a
+response. The panel is extensible by configuration — adding or swapping a
+provider is an env/config change, not a code change — and by subclassing
+`Evaluator` when a juror needs logic that isn't a chat completion.
 
-## Core Agent Components
+**Jurors do not assign a 0-10 score.** Each one answers every rubric
+criterion `True`/`False`, and the panel resolves each criterion by majority
+vote among the jurors that answered it. This is the core property to respect
+when extending the panel: a custom juror that returns a numeric score will
+be ignored by the vote.
 
-### 1. Evaluator Panel (`src/jury/panel.py`)
+## Core Components
 
-The `EvaluatorPanel` orchestrates multiple independent evaluators and aggregates their assessments.
+Everything is in one module, `src/jury/evaluators.py`:
+
+| Class | Role |
+|---|---|
+| `Evaluator` | Abstract base: `evaluate()` + `get_name()` |
+| `LLMEvaluator` | Juror over any OpenAI-compatible provider (DeepSeek, OpenAI) |
+| `TypesafeEvaluator` | Juror over Typesafe's typed Q&A API |
+| `RulesBasedEvaluator` | Legacy score-based evaluator; **not** in the panel |
+| `EvaluatorPanel` | Builds the jurors, runs them in parallel, votes |
+
+`src/jury/__init__.py` only exports `Evaluator`, `EvaluatorPanel`,
+`AccuracyCalculator` and `HumanInTheLoop` — the concrete evaluator classes
+are imported from `src.jury.evaluators` directly.
+
+### EvaluatorPanel
 
 ```python
 from src.jury import EvaluatorPanel
 
-panel = EvaluatorPanel()
-result = panel.evaluate(
-    response="...",
-    criteria={...},
-    context={...}
-)
+panel = EvaluatorPanel()  # defaults to config.JURY_PROVIDERS
+result = panel.evaluate(response="...", criteria={...}, context={...})
 ```
 
+`__init__(providers=None)` takes a list of `{name, model, api_key,
+base_url}` dicts — one per juror. `name == "typesafe"` selects
+`TypesafeEvaluator`; anything else gets `LLMEvaluator`.
+
 **Responsibilities:**
-- Coordinates evaluation across multiple evaluators
-- Handles concurrent evaluations
-- Aggregates scores and confidence metrics
-- Produces consensus results
+- Instantiates one juror per provider
+- Runs all jurors concurrently in a `ThreadPoolExecutor` (one thread each),
+  so panel latency is the slowest juror's, not the sum
+- Resolves each rubric criterion by majority vote
+- Produces `pass_rate`, per-criterion confidence, and a backward-compatible
+  `average_score` (`pass_rate * 10`) for the downstream consumers that still
+  expect a number
 
-### 2. Evaluator Base Class (`src/jury/evaluator.py`)
-
-All evaluators inherit from the abstract `Evaluator` base class:
+### The Evaluator contract
 
 ```python
+from typing import Any, Dict
 from src.jury import Evaluator
 
 class MyEvaluator(Evaluator):
-    def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-        """Perform evaluation and return structured result"""
-        # Implementation
-        pass
-    
+    def evaluate(
+        self,
+        response: str,
+        criteria: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        ...
+
     def get_name(self) -> str:
-        """Return evaluator name"""
         return "MyEvaluator"
 ```
 
-**Required Methods:**
-- `evaluate()` - Core evaluation logic
-- `get_name()` - Evaluator identifier
+**Input — `criteria`** is the rubric from
+[`CriteriaGenerator`](src/rule_generator/criteria.py). The list the panel
+reads is `weighted_criteria`:
 
-**Return Format:**
 ```python
 {
-    "score": 7.5,              # 0-10 numeric score
-    "confidence": 0.85,        # 0-1 confidence level
-    "reasoning": "...",        # Explanation of assessment
-    "component_scores": {      # Optional: break down by criteria
-        "accuracy": 8.0,
-        "completeness": 7.0,
-        "clarity": 7.5
-    },
-    "flags": []                # Optional: important findings
+    "weighted_criteria": [
+        {
+            "name": "Relevance",
+            "description": "Is the response relevant to the query?",
+            "criterion_type": "boolean",
+            "weight": 1.0,
+            "normalized_weight": 0.11,
+        },
+        ...
+    ],
+    ...
 }
 ```
 
-## Built-in Evaluators
+Every criterion is boolean, and its `description` is phrased as a yes/no
+question. `normalized_weight` is available but **not** used by the vote,
+which is a plain majority.
+
+**Input — `context`** is the stage-1 analysis with two keys flattened on top
+by `jury_evaluation_node`: `task_type` (from stage 2) and
+`complexity_score` (lifted out of the nested `complexity` dict). Read those
+two from the top level; everything else stays nested.
+
+**Output** — what the panel actually consumes:
+
+```python
+{
+    "verdicts": {"Relevance": True, "Clarity": False},  # required
+    "confidence": 0.85,                                  # 0-1, overall
+    "evaluator": "MyEvaluator",                          # vote key
+    "evaluator_type": "custom",                          # optional label
+    "reasoning": "...",                                  # optional
+    "criterion_confidences": {                           # optional
+        "Relevance": 0.9,
+        "Clarity": 0.4,
+    },
+}
+```
+
+Three things to get right:
+
+1. **Omit a criterion to abstain.** A criterion missing from `verdicts`
+   costs no vote in either direction. This is deliberate: a parse failure
+   should remove a juror from that criterion, not push a guessed verdict
+   into the vote.
+2. **`evaluator` is the vote key.** `_vote_on_criterion` indexes votes by
+   `evaluation["evaluator"]`, so two jurors returning the same name
+   collapse into one vote. Make `get_name()` unique per instance (that's why
+   `LLMEvaluator` names itself `LLM-<provider>`).
+3. **`criterion_confidences` beats `confidence`.** If you can say how sure
+   you are per criterion, publish it — otherwise every criterion from your
+   juror carries the same flat number.
+
+## Built-in Jurors
 
 ### LLMEvaluator
 
-Uses Claude to assess responses against criteria.
+A chat completion against one provider, parsed back into verdicts.
 
 ```python
-from src.jury.llm_evaluator import LLMEvaluator
+from src.jury.evaluators import LLMEvaluator
 
-evaluator = LLMEvaluator(model="claude-opus-4")
-result = evaluator.evaluate(
-    response="Neural networks are...",
-    criteria={
-        "accuracy": {
-            "description": "Is the explanation correct?",
-            "weight": 1.0
-        },
-        "completeness": {
-            "description": "Does it cover key concepts?",
-            "weight": 0.8
-        }
-    },
-    context={"task_type": "explanation", "domain": "AI"}
+evaluator = LLMEvaluator(
+    evaluator_type="deepseek",
+    model="deepseek-v4-pro",
+    api_key="...",
+    base_url="https://api.deepseek.com",
 )
 ```
 
-**Configuration:**
-- `model`: Claude model to use (default: "claude-opus-4")
-- `temperature`: Sampling temperature (default: 0.7)
-- `max_tokens`: Max response tokens (default: 2048)
+- Prompt comes from the Langfuse-managed `llm_evaluation` template; it asks
+  for one `"<Criterion Name>: True|False"` line per criterion, then
+  `Confidence:` and `Reasoning:`.
+- `_parse_evaluation` matches each expected criterion name against the
+  response lines; unmatched criteria are left out (abstention).
+- The client is built with `max_tokens=JURY_LLM_MAX_TOKENS` (default 8000,
+  not the pipeline's 2048) because reasoning models spend budget on hidden
+  tokens before writing a verdict.
+- The client is built with **`fallbacks=()`**. Unlike every other
+  `LLMClient` in the project, a juror has no cross-provider fallback: a
+  juror answering with another vendor's model would break the panel's one
+  real property. A down provider means the juror drops out of the vote.
+
+### TypesafeEvaluator
+
+Not a chat completion — Typesafe takes typed questions and returns
+structured answers, so there's nothing to regex-parse.
+
+```python
+from src.jury.evaluators import TypesafeEvaluator
+
+evaluator = TypesafeEvaluator(model="...", api_key="...", base_url="...")
+```
+
+- One `"noul"` (yes/no) question per criterion, with instructions mirroring
+  the `llm_evaluation` prompt's "fully satisfies, no partial credit"
+  standard — deliberately, so this juror isn't held to a looser bar just
+  for having a different API shape.
+- `noul` comes back as a float 0-1, not a literal boolean:
+  `verdicts[name] = noul >= 0.5`, and the distance from the decision
+  boundary becomes that verdict's confidence (`abs(noul - 0.5) * 2`). Seeing
+  `0.83` instead of `"True"` in Langfuse is the native format, not a bug.
+- `TypesafeClient` is plain `httpx`, not the `langfuse.openai` wrapper, so
+  this class traces itself manually to stay visible next to the other
+  jurors.
 
 ### RulesBasedEvaluator
 
-Fast heuristic-based evaluation using predefined rules.
+Score-based (0-10) string heuristics: response length, error words, average
+sentence length. It is **not** in `JURY_PROVIDERS` and not instantiated by
+`_init_evaluators` — it predates the boolean rubric and is kept only as
+history. Don't model a new juror on it.
+
+## Adding a Juror
+
+### Option 1: another provider (no code)
+
+The panel is driven by `JURY_PROVIDERS`, derived from `PROVIDERS` in
+[`src/config.py`](src/config.py). Add an entry there (model, api key, base
+url from the environment) and the panel grows a juror. Any
+OpenAI-compatible provider works through `LLMEvaluator` as-is; list it in
+`OPENAI_COMPATIBLE_PROVIDERS` if it should also be eligible as an
+`LLMClient` fallback elsewhere in the pipeline.
+
+Per-call, you can also pass the list directly:
 
 ```python
-from src.jury.rules_based import RulesBasedEvaluator
-
-evaluator = RulesBasedEvaluator()
-result = evaluator.evaluate(
-    response="...",
-    criteria={...},
-    context={...}
-)
+panel = EvaluatorPanel(providers=[
+    {"name": "deepseek", "model": "...", "api_key": "...", "base_url": "..."},
+    {"name": "openai",   "model": "...", "api_key": "...", "base_url": "..."},
+])
 ```
 
-**Use Cases:**
-- Quick validation checks
-- Consistency verification
-- Format compliance
-- Baseline assessments
+Keep `MIN_EVALUATORS` (default 3) in mind: an even-sized panel makes ties
+more likely, and ties fail closed.
 
-## Creating Custom Evaluators
+### Option 2: a custom Evaluator subclass
 
-### Basic Custom Evaluator
-
-```python
-from src.jury import Evaluator
-from typing import Dict, Any
-
-class DomainExpertEvaluator(Evaluator):
-    """Evaluates responses from domain-specific perspective"""
-    
-    def __init__(self, domain: str):
-        self.domain = domain
-    
-    def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-        """Assess response within domain context"""
-        # Your evaluation logic
-        score = self._calculate_domain_score(response, criteria)
-        confidence = self._estimate_confidence(score)
-        
-        return {
-            "score": score,
-            "confidence": confidence,
-            "reasoning": f"Domain: {self.domain}. Score rationale...",
-            "component_scores": {
-                "domain_accuracy": 8.0,
-                "terminology": 7.5,
-                "methodology": 7.0
-            }
-        }
-    
-    def get_name(self) -> str:
-        return f"DomainExpertEvaluator_{self.domain}"
-    
-    def _calculate_domain_score(self, response: str, criteria: Dict) -> float:
-        # Domain-specific scoring logic
-        pass
-    
-    def _estimate_confidence(self, score: float) -> float:
-        # Confidence estimation based on score
-        pass
-```
-
-### LLM-Based Custom Evaluator
-
-```python
-from src.jury.llm_evaluator import LLMEvaluator
-from src.shared.llm import LLMClient
-from typing import Dict, Any
-
-class LanguageQualityEvaluator(LLMEvaluator):
-    """Specialized evaluator for linguistic quality"""
-    
-    def __init__(self):
-        super().__init__(model="claude-opus-4")
-        self.language_criteria = [
-            "clarity", "conciseness", "grammar",
-            "vocabulary_appropriateness", "tone"
-        ]
-    
-    def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-        # Customize evaluation prompt for language quality
-        prompt = self._build_language_prompt(response, context)
-        
-        llm_result = self.llm_client.call(prompt)
-        
-        # Parse and structure result
-        return self._parse_language_result(llm_result)
-    
-    def get_name(self) -> str:
-        return "LanguageQualityEvaluator"
-    
-    def _build_language_prompt(self, response: str, context: Dict) -> str:
-        return f"""Evaluate the linguistic quality of this response:
-
-Response: {response}
-
-Assess: {', '.join(self.language_criteria)}
-
-Provide scores 0-10 for each dimension and overall assessment."""
-    
-    def _parse_language_result(self, llm_result: str) -> Dict:
-        # Parse LLM output into structured format
-        pass
-```
-
-## Integrating Custom Evaluators
-
-### Option 1: Add to EvaluatorPanel
+For a juror that isn't a chat completion (another structured API, a local
+model, a deterministic check), implement the contract and append it to the
+panel. There is no `add_evaluator()` method — the list is `panel.evaluators`:
 
 ```python
 from src.jury import EvaluatorPanel
-from custom_evaluators import MyEvaluator
 
-# Initialize panel with custom evaluator
 panel = EvaluatorPanel()
-panel.add_evaluator(MyEvaluator())
-panel.add_evaluator(DomainExpertEvaluator(domain="biology"))
-
-# Use in agent
-agent = AdaptiveJuryAgent()
-agent.evaluator_panel = panel
-
-# Evaluate
-result = agent.evaluate(conversation, response)
+panel.evaluators.append(MyEvaluator())
 ```
 
-### Option 2: Configuration-Based Loading
+To use it in the real pipeline, set it on the shared nodes instance:
 
 ```python
-# In src/config.py
-EVALUATORS = [
-    {
-        "name": "llm_evaluator",
-        "class": "src.jury.LLMEvaluator",
-        "config": {"model": "claude-opus-4"}
-    },
-    {
-        "name": "domain_expert",
-        "class": "custom_evaluators.DomainExpertEvaluator",
-        "config": {"domain": "biology"}
-    },
-    {
-        "name": "rules_based",
-        "class": "src.jury.RulesBasedEvaluator",
-        "config": {}
-    }
-]
+from src.agent.pipeline_graph import get_pipeline_nodes
 
-# Load dynamically
-from src.jury import EvaluatorPanel
-
-def load_evaluators(config):
-    panel = EvaluatorPanel()
-    for eval_config in config.EVALUATORS:
-        evaluator = load_class(eval_config["class"])(**eval_config["config"])
-        panel.add_evaluator(evaluator)
-    return panel
+get_pipeline_nodes().evaluator_panel = panel
 ```
 
-## Advanced Patterns
+**Your `evaluate()` runs on a worker thread.** Don't share mutable state
+between calls without a lock, and don't assume jurors execute in sequence.
 
-### Evaluator with Caching
+## Example: a deterministic juror
 
-```python
-from src.jury import Evaluator
-from src.memory_manager import CacheManager
-import hashlib
-
-class CachedEvaluator(Evaluator):
-    """Evaluator with result caching to reduce redundant assessments"""
-    
-    def __init__(self):
-        self.cache = CacheManager(ttl=3600)  # 1 hour TTL
-    
-    def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-        # Create cache key from inputs
-        cache_key = self._make_cache_key(response, criteria)
-        
-        # Check cache
-        cached = self.cache.get(cache_key)
-        if cached:
-            return cached
-        
-        # Perform evaluation
-        result = self._do_evaluation(response, criteria, context)
-        
-        # Cache result
-        self.cache.set(cache_key, result)
-        
-        return result
-    
-    def _make_cache_key(self, response: str, criteria: Dict) -> str:
-        key_str = f"{response}:{str(criteria)}"
-        return hashlib.md5(key_str.encode()).hexdigest()
-    
-    def _do_evaluation(self, response: str, criteria: Dict, context: Dict) -> Dict:
-        pass
-    
-    def get_name(self) -> str:
-        return "CachedEvaluator"
-```
-
-### Weighted Evaluator Composition
+A juror doesn't have to call a model. Anything that can answer the rubric
+yes/no — and honestly abstain on what it can't judge — is a valid panel
+member.
 
 ```python
+import ast
+from typing import Any, Dict
+
 from src.jury import Evaluator
 
-class CompositeEvaluator(Evaluator):
-    """Combines multiple evaluators with weighted voting"""
-    
-    def __init__(self, evaluators: list, weights: list):
-        self.evaluators = evaluators
-        self.weights = weights
-        
-        if len(evaluators) != len(weights):
-            raise ValueError("Evaluators and weights must have same length")
-        if sum(weights) != 1.0:
-            raise ValueError("Weights must sum to 1.0")
-    
-    def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-        results = []
-        
-        # Get evaluations from all sub-evaluators
-        for evaluator in self.evaluators:
-            result = evaluator.evaluate(response, criteria, context)
-            results.append(result)
-        
-        # Weighted aggregate
-        weighted_score = sum(
-            r["score"] * w for r, w in zip(results, self.weights)
-        )
-        avg_confidence = sum(
-            r["confidence"] * w for r, w in zip(results, self.weights)
-        )
-        
-        # Combine reasoning
-        reasoning = " + ".join([
-            f"{e.get_name()}: {r['reasoning']}"
-            for e, r in zip(self.evaluators, results)
-        ])
-        
+
+class SyntaxValidityEvaluator(Evaluator):
+    """Votes only on criteria it can decide mechanically.
+
+    A Python snippet that doesn't parse cannot be correct, and that's
+    knowable without an LLM. Every other criterion is abstained on rather
+    than guessed, so this juror adds a vote where it has standing and stays
+    out of the rest.
+    """
+
+    DECIDABLE = {"Correctness", "Technical Depth"}
+
+    def evaluate(
+        self,
+        response: str,
+        criteria: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if context.get("task_type") != "code_generation":
+            # Nothing to say about non-code tasks: abstain on everything.
+            return {"verdicts": {}, "confidence": 0.0, "evaluator": self.get_name()}
+
+        try:
+            ast.parse(self._extract_code(response))
+            parses = True
+        except SyntaxError:
+            parses = False
+
+        names = {c["name"] for c in criteria.get("weighted_criteria", [])}
+        verdicts = {
+            name: parses for name in names & self.DECIDABLE
+        }
+
         return {
-            "score": weighted_score,
-            "confidence": avg_confidence,
-            "reasoning": reasoning,
-            "component_evaluations": results
+            "verdicts": verdicts,
+            # A syntax error is a fact, not an opinion.
+            "confidence": 1.0 if not parses else 0.6,
+            "reasoning": f"ast.parse {'succeeded' if parses else 'failed'}",
+            "evaluator": self.get_name(),
+            "evaluator_type": "syntax",
         }
-    
+
     def get_name(self) -> str:
-        return "CompositeEvaluator"
-```
+        return "Syntax"
 
-### Adaptive Evaluator Selection
-
-```python
-from src.jury import Evaluator
-
-class AdaptiveEvaluator(Evaluator):
-    """Selects evaluator strategy based on context"""
-    
-    def __init__(self):
-        self.evaluators_by_task = {
-            "code_generation": CodeEvaluator(),
-            "explanation": ExplanationEvaluator(),
-            "summarization": SummarizationEvaluator(),
-        }
-        self.default = LLMEvaluator()
-    
-    def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-        task_type = context.get("task_type", "general")
-        
-        # Select evaluator based on task
-        evaluator = self.evaluators_by_task.get(
-            task_type, self.default
-        )
-        
-        return evaluator.evaluate(response, criteria, context)
-    
-    def get_name(self) -> str:
-        return "AdaptiveEvaluator"
+    def _extract_code(self, response: str) -> str:
+        ...
 ```
 
 ## Best Practices
 
-### 1. Score Consistency
-- Always return scores in 0-10 range
-- Document what each score level means for your evaluator
-- Ensure consistency across different response types
+### 1. Vote, don't score
+Return `verdicts: {criterion: bool}`. The panel has no path for a numeric
+score — `average_score` is derived from the vote's pass rate downstream, not
+collected from jurors.
 
-```python
-def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-    score = self._calculate_score(response, criteria)
-    
-    # Validate score range
-    if not (0 <= score <= 10):
-        raise ValueError(f"Score must be 0-10, got {score}")
-    
-    return {
-        "score": score,
-        "confidence": self._estimate_confidence(response, score),
-        "reasoning": "..."
-    }
-```
+### 2. Abstain instead of guessing
+Leave a criterion out of `verdicts` when you can't judge it (parse failure,
+out of scope, missing input). A guessed verdict is worse than a missing one:
+it's indistinguishable from a real vote.
 
-### 2. Meaningful Confidence
-- Confidence should reflect actual uncertainty in assessment
-- Higher confidence when evaluation is clear-cut
-- Lower confidence with ambiguous or edge-case responses
+### 3. Make confidence mean something
+Confidence should track actual uncertainty, because it drives
+human-in-the-loop: `jury_evaluation_node` flags a run for review when panel
+confidence falls below the threshold. Publish `criterion_confidences` when
+you can judge per criterion. A juror that always returns `0.9` quietly
+disables that safety net.
 
-```python
-def _estimate_confidence(self, response: str, score: float) -> float:
-    # High confidence for extreme scores (very good/very bad)
-    if score >= 8.5 or score <= 1.5:
-        return 0.9
-    
-    # Medium-high for clear assessments
-    if score >= 7.0 or score <= 3.0:
-        return 0.75
-    
-    # Lower confidence for ambiguous cases
-    return 0.6
-```
+### 4. Fail loud at construction, quiet at evaluation
+Misconfiguration (missing key, empty base url) should fail when the juror is
+built, not silently answer with a default. A failure *during* evaluation
+should degrade to abstention — an empty `verdicts` — so the panel shrinks
+instead of crashing the pipeline.
 
-### 3. Component Breakdown
-- Always provide component scores when criteria are specific
-- Helps understand where improvements are needed
-- Useful for human review and feedback
+### 5. Stay one vendor per juror
+Don't give a juror a fallback to another vendor's model. The panel's whole
+premise is independent providers; a juror that can answer as its neighbour
+turns a 3-vendor panel into a 2-vendor panel without saying so.
 
-```python
-return {
-    "score": 7.2,
-    "confidence": 0.8,
-    "reasoning": "Good overall, but some gaps in explanation",
-    "component_scores": {
-        "accuracy": 8.0,
-        "clarity": 7.0,
-        "completeness": 6.5
-    }
-}
-```
+### 6. Be traceable
+`LLMClient` calls are traced to Langfuse automatically. If your juror talks
+to an API through anything else, trace it yourself the way
+`TypesafeEvaluator` does, or it will be invisible next to the other jurors.
 
-### 4. Error Handling
-- Catch and log evaluation failures gracefully
-- Return degraded assessment rather than crashing
-- Include error info in reasoning
+## Testing a Juror
 
-```python
-def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-    try:
-        return self._do_evaluation(response, criteria, context)
-    except Exception as e:
-        logger.error(f"Evaluation failed: {e}")
-        
-        # Return minimal valid result
-        return {
-            "score": 5.0,  # Neutral score
-            "confidence": 0.1,  # Low confidence
-            "reasoning": f"Evaluation error: {str(e)}",
-            "error": True
-        }
-```
-
-### 5. Context Awareness
-- Use context information to tailor evaluation
-- Different tasks require different assessment strategies
-- Leverage semantic and structural analysis
-
-```python
-def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-    task_type = context.get("task_type")
-    complexity = context.get("complexity", {}).get("level")
-    
-    # Adjust evaluation based on task and complexity
-    if task_type == "code_generation" and complexity == "high":
-        return self._evaluate_complex_code(response, criteria)
-    else:
-        return self._evaluate_simple(response, criteria)
-```
-
-## Testing Evaluators
+Test the contract, not a score range:
 
 ```python
 import pytest
-from src.jury.evaluators import MyEvaluator
 
-class TestMyEvaluator:
-    
+from custom_evaluators import SyntaxValidityEvaluator
+
+CRITERIA = {
+    "weighted_criteria": [
+        {"name": "Correctness", "description": "Is it correct?",
+         "criterion_type": "boolean", "weight": 1.0},
+        {"name": "Clarity", "description": "Is it clear?",
+         "criterion_type": "boolean", "weight": 0.8},
+    ]
+}
+CONTEXT = {"task_type": "code_generation", "complexity_score": 6}
+
+
+class TestSyntaxValidityEvaluator:
+
     @pytest.fixture
     def evaluator(self):
-        return MyEvaluator()
-    
-    def test_evaluate_returns_valid_structure(self, evaluator):
-        result = evaluator.evaluate(
-            response="Test response",
-            criteria={"accuracy": {"weight": 1.0}},
-            context={"task_type": "test"}
-        )
-        
-        assert "score" in result
-        assert "confidence" in result
-        assert "reasoning" in result
-        assert 0 <= result["score"] <= 10
+        return SyntaxValidityEvaluator()
+
+    def test_returns_boolean_verdicts(self, evaluator):
+        result = evaluator.evaluate("def f(): return 1", CRITERIA, CONTEXT)
+
+        assert all(isinstance(v, bool) for v in result["verdicts"].values())
         assert 0 <= result["confidence"] <= 1
-    
-    def test_score_consistency(self, evaluator):
-        responses = ["good response", "better response", "best response"]
-        scores = []
-        
-        for resp in responses:
-            result = evaluator.evaluate(resp, {}, {})
-            scores.append(result["score"])
-        
-        # Verify increasing quality corresponds to increasing scores
-        assert scores[0] <= scores[1] <= scores[2]
-    
-    def test_handles_edge_cases(self, evaluator):
-        # Empty response
-        result = evaluator.evaluate("", {}, {})
-        assert "error" not in result or result.get("error") is False
-        
-        # Very long response
-        long_resp = "word " * 10000
-        result = evaluator.evaluate(long_resp, {}, {})
-        assert "error" not in result or result.get("error") is False
+        assert result["evaluator"] == "Syntax"
+
+    def test_abstains_on_criteria_it_cannot_judge(self, evaluator):
+        result = evaluator.evaluate("def f(): return 1", CRITERIA, CONTEXT)
+
+        # No opinion on Clarity -- and that must be absence, not False.
+        assert "Clarity" not in result["verdicts"]
+
+    def test_abstains_entirely_off_task(self, evaluator):
+        result = evaluator.evaluate("hello", CRITERIA, {"task_type": "general"})
+
+        assert result["verdicts"] == {}
 ```
 
-## Performance Considerations
+To test the panel's voting without calling any provider, build it with stub
+jurors:
 
-### Concurrent Evaluation
-The `EvaluatorPanel` runs evaluations concurrently when possible:
-
-```python
-# This runs all evaluators in parallel
-result = panel.evaluate(response, criteria, context)
-```
-
-### Caching Strategy
-```python
-from src.memory_manager import CacheManager
-
-cache = CacheManager(
-    max_size=1000,      # Max items
-    ttl=3600            # Time-to-live in seconds
-)
-```
-
-### Batch Processing
 ```python
 from src.jury import EvaluatorPanel
 
-panel = EvaluatorPanel()
 
-# Evaluate multiple responses efficiently
-responses = ["response1", "response2", "response3"]
-results = [
-    panel.evaluate(resp, criteria, context)
-    for resp in responses
-]
+class StubJuror:
+    def __init__(self, name, verdicts):
+        self._name, self._verdicts = name, verdicts
+
+    def evaluate(self, response, criteria, context):
+        return {"verdicts": self._verdicts, "confidence": 0.9,
+                "evaluator": self._name}
+
+    def get_name(self):
+        return self._name
+
+
+def test_tie_fails_closed():
+    panel = EvaluatorPanel()
+    # `__init__` does `providers or JURY_PROVIDERS`, so an empty list does
+    # NOT give an empty panel -- it gives the configured one. Replace the
+    # list instead. No provider is contacted at construction time.
+    panel.evaluators = [
+        StubJuror("a", {"Correctness": True}),
+        StubJuror("b", {"Correctness": False}),
+    ]
+
+    result = panel.evaluate("...", CRITERIA, CONTEXT)
+
+    assert result["verdicts"]["Correctness"]["passed"] is False
+    assert result["verdicts"]["Correctness"]["confidence"] == 0.0
 ```
 
-## Extension Examples
+## Performance Notes
 
-### Sentiment-Based Evaluator
+### Concurrency
+The panel already runs its jurors in parallel (`ThreadPoolExecutor`, one
+thread per juror), and `pool.map` keeps the reported `evaluations` list in
+provider order. Adding a juror costs panel latency only if it's slower than
+the current slowest one.
+
+### Caching
+Caching happens at the pipeline level, not per juror:
+`CacheManager` is keyed on the conversation text, so a repeated transcript
+skips the graph entirely. Its constructor takes `max_size_mb` and
+`ttl_hours` (not bytes and seconds):
+
 ```python
-from src.jury import Evaluator
-from transformers import pipeline
+from src.memory_manager import CacheManager
 
-class SentimentEvaluator(Evaluator):
-    def __init__(self):
-        self.sentiment_pipeline = pipeline("sentiment-analysis")
-    
-    def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-        sentiment = self.sentiment_pipeline(response)[0]
-        
-        # Map sentiment to score
-        score_map = {
-            "POSITIVE": 8.0,
-            "NEGATIVE": 3.0,
-            "NEUTRAL": 5.0
-        }
-        score = score_map[sentiment["label"]]
-        
-        return {
-            "score": score,
-            "confidence": sentiment["score"],
-            "reasoning": f"Sentiment: {sentiment['label']}"
-        }
-    
-    def get_name(self) -> str:
-        return "SentimentEvaluator"
+cache = CacheManager(max_size_mb=1024, ttl_hours=24)
 ```
 
-### Code Quality Evaluator
-```python
-from src.jury import Evaluator
-import ast
-
-class CodeQualityEvaluator(Evaluator):
-    def evaluate(self, response: str, criteria: Dict, context: Dict) -> Dict:
-        try:
-            tree = ast.parse(response)
-        except SyntaxError:
-            return {
-                "score": 0.0,
-                "confidence": 1.0,
-                "reasoning": "Code contains syntax errors"
-            }
-        
-        metrics = {
-            "has_docstrings": self._check_docstrings(tree),
-            "function_complexity": self._check_complexity(tree),
-            "follows_pep8": self._check_pep8(response)
-        }
-        
-        score = sum(metrics.values()) / len(metrics) * 10
-        
-        return {
-            "score": score,
-            "confidence": 0.9,
-            "reasoning": f"Code quality metrics: {metrics}",
-            "component_scores": {k: v * 10 for k, v in metrics.items()}
-        }
-    
-    def get_name(self) -> str:
-        return "CodeQualityEvaluator"
-    
-    def _check_docstrings(self, tree: ast.AST) -> float:
-        pass
-    
-    def _check_complexity(self, tree: ast.AST) -> float:
-        pass
-    
-    def _check_pep8(self, code: str) -> float:
-        pass
-```
+### Batch evaluation
+There is no batch API on the panel. For datasets, call the pipeline per
+conversation — `scripts/run_deep_agent.py` does this and writes results
+incrementally, so a long run doesn't lose finished work.
 
 ## Related Documentation
 
-- [Architecture Overview](README.md#architecture-overview)
-- [Rule Generation](./rule_generation.md)
-- [Metrics Aggregation](./metrics.md)
-- [Memory Management](./memory_management.md)
-- [Human-in-the-Loop](./human_feedback.md)
+- [doc/jury.md](doc/jury.md) — this stage in detail (Portuguese)
+- [doc/rule_generator.md](doc/rule_generator.md) — where the rubric comes from
+- [doc/metrics.md](doc/metrics.md) — what happens to the pass rate afterwards
+- [doc/config.md](doc/config.md) — `JURY_PROVIDERS`, token budgets, thresholds
+- [doc/agent.md](doc/agent.md) — the LangGraph pipeline around the panel
+- [GETTING_STARTED.md](GETTING_STARTED.md) — running it
