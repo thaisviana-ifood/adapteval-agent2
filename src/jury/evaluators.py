@@ -51,7 +51,16 @@ class LLMEvaluator(Evaluator):
         # empty string -- e.g. an unset TYPESAFE_BASE_URL -- must still be
         # passed through, so the client fails loudly instead of silently
         # falling back to LLMClient's DeepSeek-flavored defaults.
-        client_kwargs: Dict[str, Any] = {"max_tokens": JURY_LLM_MAX_TOKENS}
+        #
+        # `fallbacks=()`: a juror that silently answers with another
+        # vendor's model would break the one property the panel is built on
+        # -- one provider per juror, so no vendor grades itself. A juror
+        # whose provider is down must drop out of the vote, not be
+        # impersonated by its neighbour.
+        client_kwargs: Dict[str, Any] = {
+            "max_tokens": JURY_LLM_MAX_TOKENS,
+            "fallbacks": (),
+        }
         if model is not None:
             client_kwargs["model"] = model
         if api_key is not None:

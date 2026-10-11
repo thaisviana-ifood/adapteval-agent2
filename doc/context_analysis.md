@@ -2,12 +2,13 @@
 
 Recebe a conversa multi-turn crua (string com turnos `"User: ..."` /
 `"Assistant: ..."`) e produz um dicionário com 4 dimensões de análise.
-`structural`, `complexity` e `intent` são **heurísticos/estatísticos**
-(regex, contagem de palavras, TF-IDF) — não fazem chamada de LLM.
-`semantic` é o único que chama LLM, e só para o que exige interpretação
-(key phrases, resumo, sentimento), cada um com seu **classificador LLM** e
-prompt gerenciado via `PromptManager`/Langfuse; `topics` continua
-estatístico (TF-IDF).
+`structural` e `complexity` são **heurísticos/estatísticos** (regex,
+contagem de palavras, TF-IDF) — não fazem chamada de LLM. `semantic` e
+`intent` chamam LLM, e só para o que exige interpretação (key phrases,
+resumo, sentimento; intenções e alinhamento), cada campo com seu
+**classificador LLM** e prompt gerenciado via `PromptManager`/Langfuse —
+a plumbing comum vive em `src/shared/llm/classifier.py`. `topics` continua
+estatístico (TF-IDF), e todo classificador degrada para um caminho sem LLM.
 
 `ContextAnalyzer.analyze(conversation)` (`analyzer.py`) apenas roda os 4
 abaixo e agrupa o resultado:
@@ -117,19 +118,89 @@ se adiciona o critério dinâmico "Technical Depth" (limiar > 7), e o que
 
 ## `intent.py` — `IntentAnalyzer`
 
-Casamento de palavras-chave (não é NLU de verdade):
+Intenção é uma pergunta sobre significado, então o caminho principal é
+**semântico**: classificadores LLM, um por campo, cada um com seu prompt
+gerenciado via `PromptManager`/Langfuse (mesmo padrão do `semantic.py`):
 
-- `user_intents`: quais das 7 categorias (`help`, `explain`, `fix`,
-  `create`, `analyze`, `learn`, `optimize`) têm alguma keyword presente na
-  conversa inteira; fallback `["general_inquiry"]`.
-- `assistant_objectives`: mesma ideia para 5 categorias (`inform`, `assist`,
-  `validate`, `suggest`, `implement`).
-- `intent_alignment_score`: sobreposição entre os dois conjuntos acima,
-  normalizada pelo maior conjunto (0.5 se algum lado estiver vazio).
-- `intent_segments`: agrupa turnos (split por `\n\n`) por intenção detectada
-  turno-a-turno (`question`/`request`/`statement`/`neutral`, via
-  `_detect_turn_intent`) — não é muito usado a jusante hoje.
-- `primary_intent`: primeiro item de `user_intents`, ou `"unknown"`.
+| prompt | produz |
+|---|---|
+| `intent_user_classification` | `user_intents` / `primary_intent` |
+| `intent_user_classification_closed_set` | idem, restrito a uma taxonomia fixa |
+| `intent_assistant_objectives` | `assistant_objectives` |
+| `intent_alignment_scoring` | `intent_alignment_score` |
+
+Campos do resultado:
+
+- `user_intents`: verbos únicos em minúsculas, ordenados por importância, com
+  `primary_intent` sempre em primeiro. São os mesmos tokens que
+  `rule_generator/classifier.py` compara por igualdade exata — daí o
+  vocabulário preferencial `INTENT_VOCABULARY`.
+- `user_intent_details`: lista paralela a `user_intents`, cada item com
+  `label`, `evidence` (citação literal do usuário) e `confidence`.
+- `intent_segments`: `{intenção: evidência}` — as citações acima, não mais
+  buckets de keyword.
+- `assistant_objectives` / `assistant_objectives_confidence`: o que o
+  assistente *tentou* fazer (não se conseguiu).
+- `intent_alignment_score` + `intent_alignment_rationale` + `unmet_intents`:
+  se o assistente engajou com o que o usuário pediu. Mede **alinhamento, não
+  qualidade** — errar a resposta certa continua alinhado.
+- `primary_intent` / `primary_intent_confidence`.
+- `classifier_failures`: nomes dos prompts que degradaram nesta conversa.
+
+**Espaço de labels:** `IntentAnalyzer(taxonomy=[...])` liga o modo *closed
+set* — o classificador escolhe `primary_intent` de uma lista fixa e qualquer
+label fora dela é descartado. Serve para medir o analyzer contra um goldenset
+rotulado, ou para fixá-lo nas intenções do próprio produto. Sem `taxonomy`,
+ele emite os verbos de `INTENT_VOCABULARY`.
+
+**Não há classificador determinístico de intenção.** O LLM é o único caminho:
+não existe mais nem o mapa de keywords original nem o `_TaxonomyMatcher` que
+casava os tokens do próprio label (0.29 e 0.85 de acurácia contra 0.94 do
+semântico, e nenhum dos dois lê significado — lê grafia, então responde com a
+mesma confiança a paráfrase e a typo). Um segundo espaço de labels para manter
+em sincronia não valia isso.
+
+**Degradação:** cada classificador degrada sozinho e registra seu nome em
+`classifier_failures`, sem afetar os outros campos — mas o de intenção não tem
+para onde degradar, então reporta a falha: `primary_intent` = `"unknown"`,
+`user_intents` vazio, e o alinhamento fica sem intenção para comparar e se
+declara indefinido (0.5) em vez de 0.0. Os outros dois continuam com fallback
+determinístico (`assistant_objectives` por keyword, alinhamento por
+`_OBJECTIVE_COMPATIBILITY` + TF-IDF), porque a pergunta deles é sobre um turno
+do assistente que já está em mãos, não sobre o que o usuário quis dizer.
+
+Conversa sem turno `Assistant:` não roda os classificadores de objetivo e
+alinhamento (não há o que ler), então uma utterance isolada custa **1
+chamada**, não 3.
+
+### Por que não é mais keyword matching
+
+Medido sobre o goldenset Bitext de 27.722 utterances
+(`scripts/eval_intent_accuracy.py`), o caminho antigo tinha:
+
+- **37% das utterances sem nenhuma keyword**, todas colapsando no fallback —
+  as 4 confusões mais frequentes eram todas desse tipo.
+- Substring não lê significado: `"how"` em qualquer posição virava
+  `explain`, então um pedido para construir algo era rotulado explicação.
+- `intent_alignment_score` era praticamente sempre `0.0`: ele intersectava
+  `user_intents` com `assistant_objectives`, mas os dois mapas de keyword não
+  compartilham nenhuma palavra por construção (`help`/`explain`/`fix` vs
+  `inform`/`assist`/`validate`).
+
+Acurácia no goldenset, nas 27 intenções e sem nenhum mapeamento dos labels:
+**0.29** (keyword) → **0.937** (`deepseek-v4-pro`, 270 utterances
+estratificadas, IC95% ±2.9pp). O `_OBJECTIVE_COMPATIBILITY` substitui a
+interseção impossível por um mapa explícito de compatibilidade + similaridade
+TF-IDF entre os dois lados da conversa.
+
+Dos 17 erros restantes, 13 estão em quatro pares quase-sinônimos
+(`check_invoice`/`get_invoice`, `set_up_shipping_address`/
+`change_shipping_address`, `get_refund`/`track_refund`,
+`delivery_period`/`track_order`) — a fronteira entre eles é convenção do
+Bitext, não semântica: um TF-IDF supervisionado chega a 0.9987 nos mesmos
+dados justamente por aprender a convenção dos exemplos. Dar essa convenção ao
+prompt (regra de contraste + exemplos por par) é o próximo ganho, e precisa de
+amostra maior que 270 para ser validado.
 
 `user_intents` e `topics` (do `semantic.py`) são os dois sinais que
 `rule_generator/classifier.py` usa para classificar o tipo de tarefa.

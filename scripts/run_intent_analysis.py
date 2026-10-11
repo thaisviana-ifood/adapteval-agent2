@@ -38,9 +38,20 @@ def analyze_dataset(dataset_path: Path) -> List[Dict[str, Any]]:
             {
                 "id": item.get("id"),
                 "primary_intent": analysis["primary_intent"],
+                "primary_intent_confidence": analysis[
+                    "primary_intent_confidence"
+                ],
                 "user_intents": analysis["user_intents"],
+                "user_intent_details": analysis["user_intent_details"],
                 "assistant_objectives": analysis["assistant_objectives"],
                 "intent_alignment_score": analysis["intent_alignment_score"],
+                "intent_alignment_rationale": analysis[
+                    "intent_alignment_rationale"
+                ],
+                "unmet_intents": analysis["unmet_intents"],
+                # Non-empty when a classifier degraded to the keyword path:
+                # the row's confidence will be 0.0 and its labels coarse.
+                "classifier_failures": analysis["classifier_failures"],
             }
         )
 

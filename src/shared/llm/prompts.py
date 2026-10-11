@@ -209,6 +209,108 @@ Rules:
 - A question or a calmly reported problem is not negative on its own; that is "neutral".
 - "label" and "sentiment_score" must agree: "negative" scores below 0.5, "positive" above 0.5, "neutral" exactly 0.5, and "mixed" 0.5 unless one side clearly dominates.
 - Output ONLY the JSON object, with no surrounding text or markdown fences.""",
+    # The four prompts below back IntentAnalyzer's LLM classifiers
+    # (src/context_analysis/intent.py). Like the semantic ones they are
+    # separate prompts so each can be versioned on its own, and each one
+    # degrades to a keyword/statistical fallback rather than raising.
+    #
+    # There are two user-intent prompts because the analyzer runs in two
+    # modes: an open vocabulary (the default, for arbitrary conversations)
+    # and a closed set (when a caller passes a fixed taxonomy, e.g. to score
+    # the analyzer against a labeled goldenset). The closed-set prompt has to
+    # forbid invention, which the open one must not.
+    "intent_user_classification": """You are identifying what the user is trying to achieve in a conversation with an AI assistant, to support downstream evaluation of the assistant's responses.
+
+Conversation:
+{{conversation}}
+
+Infer intent from what the user means, not from the words they happen to use: "this keeps crashing" is a request to fix something even though it contains no verb, and "how do I make a login page" asks for something to be built rather than explained.
+
+Prefer a label from this vocabulary, which covers most cases:
+{{vocabulary}}
+
+If none of those genuinely fits, use a different single lowercase verb.
+
+Return a single JSON object with exactly these keys:
+- "user_intents": a list of at most {{max_intents}} objects, ordered from most to least important, each with:
+  - "label": the intent as a single lowercase verb (no spaces, no punctuation)
+  - "evidence": a short verbatim quote of the user's own words that show this intent
+  - "confidence": float, 0-1
+- "primary_intent": the "label" of the single most important user intent, or "unknown" if the user's goal cannot be determined.
+- "confidence": float, 0-1 -- your confidence in "primary_intent".
+
+Rules:
+- Judge what the user WANTS, not what the assistant did about it.
+- List an intent only if the user actually expresses it; do not pad the list with plausible-sounding goals. One intent is a complete answer.
+- Every "evidence" value must be a quote from the user's turns, copied verbatim. Never quote the assistant.
+- Do not express the same goal under two labels.
+- Write labels in English regardless of the conversation's original language.
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
+    "intent_user_classification_closed_set": """You are classifying what the user wants in a conversation with an AI assistant, choosing from a fixed list of intents.
+
+Conversation:
+{{conversation}}
+
+Classify the user into exactly one intent from this closed list:
+{{taxonomy}}
+
+Infer intent from what the user means, not from the words they happen to use. Where two intents are close, the distinction is usually between asking about a policy or option and requesting the action itself -- read which one the user is after.
+
+Classify by the subject the user is after, not by the channel they propose for getting it. Asking to have someone look something up is a request about that thing:
+
+- "ask an agent if I can track my refund" -> the intent about tracking a refund, NOT an intent about contacting a person.
+- "could you ask an agent where I can close my profile" -> the intent about closing an account.
+- "I want to talk to a human being" -> an intent about contacting a person, because reaching someone is the whole request.
+
+Return a single JSON object with exactly these keys:
+- "user_intents": a list of at most {{max_intents}} objects, ordered from most to least important, each with:
+  - "label": an intent copied verbatim from the list above
+  - "evidence": a short verbatim quote of the user's own words that show this intent
+  - "confidence": float, 0-1
+- "primary_intent": the "label" of the single best-fitting intent, copied verbatim from the list above.
+- "confidence": float, 0-1 -- your confidence in "primary_intent".
+
+Rules:
+- Every "label" MUST be copied verbatim from the list above. Never invent, translate, reword, or combine labels.
+- "primary_intent" is required: pick the closest intent on the list even when the fit is imperfect.
+- List a secondary intent only when the user clearly expresses a second, different goal. Usually there is only one.
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
+    "intent_assistant_objectives": """You are identifying what an AI assistant was trying to do in a conversation, to support downstream evaluation of its responses.
+
+Conversation:
+{{conversation}}
+
+Return a single JSON object with exactly these keys:
+- "assistant_objectives": a list of at most {{max_objectives}} single lowercase verbs naming what the assistant actually set out to do, ordered from most to least central (e.g. "inform", "assist", "verify", "recommend", "implement", "redirect", "refuse").
+- "confidence": float, 0-1 -- your confidence in this reading.
+
+Rules:
+- Describe what the assistant ATTEMPTED, not whether it succeeded and not whether it was useful -- the evaluation stage judges that.
+- Base every objective on the assistant's own turns. If the conversation has no assistant turn, return an empty list and confidence 0.
+- Do not express the same objective under two verbs.
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
+    "intent_alignment_scoring": """You are judging whether an AI assistant engaged with what the user actually wanted.
+
+Conversation:
+{{conversation}}
+
+What the user wanted:
+{{user_intents}}
+
+What the assistant set out to do:
+{{assistant_objectives}}
+
+Return a single JSON object with exactly these keys:
+- "alignment_score": float, 0-1 -- 1.0 if the assistant addressed every intent the user expressed, 0.0 if it addressed none of them. Score partial coverage in between, weighting the user's primary intent most heavily.
+- "unmet_intents": a list of the user intents the assistant did not address, copied from the labels given above.
+- "rationale": 1-2 sentences citing what the assistant did or failed to do about the user's primary intent.
+
+Rules:
+- Score ALIGNMENT, not quality: an assistant that engages with the right request and gets it wrong is still aligned, and a polished answer to a question the user did not ask is not.
+- An assistant that correctly refuses, or asks a clarifying question it genuinely needs, is engaging with the intent -- do not score that as unaligned.
+- Do not reward restating the user's request without acting on it.
+- "unmet_intents" must be consistent with "alignment_score": a score of 1.0 requires an empty list.
+- Output ONLY the JSON object, with no surrounding text or markdown fences.""",
 }
 
 

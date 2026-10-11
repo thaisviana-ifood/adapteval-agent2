@@ -20,22 +20,23 @@ parse, that field comes back empty/neutral, the prompt's name is listed in
 fields never degrade.
 """
 
-import json
-import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from src.config import CLASSIFIER_LLM_MAX_TOKENS
 from src.shared.emoji import analyze_emoji_sentiment
+from src.shared.llm.classifier import (
+    JSONClassifier,
+    clean_confidence,
+    clean_score,
+    clean_string_list,
+)
 from src.shared.llm.client import LLMClient
 from src.shared.llm.prompts import PromptManager
 from src.shared.logger import get_logger
 from src.shared.utils import parse_conversation_turns, preprocess_text
 
 logger = get_logger(__name__)
-
-_JSON_OBJECT_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 
 _MAX_TOPICS = 5
 _MAX_KEY_PHRASES = 10
@@ -58,10 +59,12 @@ class SemanticAnalyzer:
         llm_client: Optional[LLMClient] = None,
         prompt_manager: Optional[PromptManager] = None,
     ):
-        self.llm_client = llm_client or LLMClient(
-            max_tokens=CLASSIFIER_LLM_MAX_TOKENS
+        self.classifier = JSONClassifier(
+            llm_client=llm_client, prompt_manager=prompt_manager
         )
-        self.prompt_manager = prompt_manager or PromptManager()
+        # Kept as attributes because callers (and tests) reach for them.
+        self.llm_client = self.classifier.llm_client
+        self.prompt_manager = self.classifier.prompt_manager
 
     def analyze(self, conversation: str) -> Dict[str, Any]:
         """
@@ -180,61 +183,21 @@ class SemanticAnalyzer:
         Returns None (and records the failure) if the prompt is missing, the
         call fails, or the response isn't a parseable JSON object.
         """
-        prompt = self.prompt_manager.format_prompt(template_name, **variables)
-        if not prompt:
-            logger.warning(f"Prompt '{template_name}' unavailable")
-            failures.append(template_name)
-            return None
+        return self.classifier.call(
+            template_name, trace_name, failures, **variables
+        )
 
-        try:
-            response_text = self.llm_client.call(
-                prompt,
-                name=trace_name,
-                langfuse_prompt=self.prompt_manager.get_prompt_client(
-                    template_name
-                ),
-            )
-        except Exception as e:
-            logger.warning(f"Classifier '{template_name}' call failed: {e}")
-            failures.append(template_name)
-            return None
+    def _clean_string_list(self, value: Any, limit: int) -> List[str]:
+        """Normalize a classifier's string list: de-duplicated, capped, no blanks"""
+        return clean_string_list(value, limit)
 
-        parsed = self._parse_json_object(response_text, template_name)
-        if parsed is None:
-            failures.append(template_name)
-        return parsed
+    def _clean_score(self, value: Any, default: float) -> float:
+        """Coerce a classifier's 0-1 score, clamping out-of-range values"""
+        return clean_score(value, default)
 
-    def _parse_json_object(
-        self, response_text: Optional[str], template_name: str
-    ) -> Optional[Dict[str, Any]]:
-        """Extract the JSON object from a classifier response"""
-        if not response_text:
-            logger.warning(f"Classifier '{template_name}' returned nothing")
-            return None
-
-        match = _JSON_OBJECT_PATTERN.search(response_text)
-        if not match:
-            logger.warning(
-                f"Classifier '{template_name}' returned no JSON object"
-            )
-            return None
-
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError as e:
-            logger.warning(
-                f"Could not parse '{template_name}' JSON: {e}"
-            )
-            return None
-
-        if not isinstance(parsed, dict):
-            logger.warning(
-                f"Classifier '{template_name}' returned {type(parsed).__name__}, "
-                "expected an object"
-            )
-            return None
-
-        return parsed
+    def _clean_confidence(self, value: Any) -> float:
+        """Coerce a classifier's confidence; absent confidence means 0.0"""
+        return clean_confidence(value)
 
     def _extract_key_phrases(
         self, conversation: str, failures: List[str]
@@ -305,38 +268,6 @@ class SemanticAnalyzer:
             "confidence": self._clean_confidence(parsed.get("confidence")),
             "rationale": str(parsed.get("rationale", "")).strip(),
         }
-
-    def _clean_string_list(self, value: Any, limit: int) -> List[str]:
-        """Normalize a classifier's string list: de-duplicated, capped, no blanks"""
-        if not isinstance(value, list):
-            return []
-
-        cleaned: List[str] = []
-        seen = set()
-        for item in value:
-            if not isinstance(item, (str, int, float)):
-                continue
-            text = str(item).strip()
-            if not text or text.lower() in seen:
-                continue
-            seen.add(text.lower())
-            cleaned.append(text)
-            if len(cleaned) >= limit:
-                break
-
-        return cleaned
-
-    def _clean_score(self, value: Any, default: float) -> float:
-        """Coerce a classifier's 0-1 score, clamping out-of-range values"""
-        try:
-            score = float(value)
-        except (TypeError, ValueError):
-            return default
-        return min(max(score, 0.0), 1.0)
-
-    def _clean_confidence(self, value: Any) -> float:
-        """Coerce a classifier's confidence; absent confidence means 0.0"""
-        return self._clean_score(value, default=0.0)
 
     def _calculate_vocabulary_diversity(self, text: str) -> float:
         """Calculate vocabulary diversity (0-1)"""

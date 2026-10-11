@@ -29,28 +29,72 @@ LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
 LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
 LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "60"))
 
-# Jury Configuration -- one LLM provider per juror, so the panel is never
-# just one vendor's model grading itself. Each entry is passed as the model
-# parameters for one juror in src.jury.evaluators.EvaluatorPanel.
-JURY_PROVIDERS: List[Dict[str, str]] = [
-    {
-        "name": "deepseek",
+# Retry policy, applied per model by src/shared/llm/client.py. Attempts are
+# spaced by exponential backoff with jitter (and by the provider's own
+# Retry-After when it sends one), capped at LLM_RETRY_MAX_DELAY so one stuck
+# call cannot stall a batch for minutes. Only failures a retry can fix are
+# retried -- see the client's docstring for which.
+LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
+LLM_RETRY_BASE_DELAY: float = float(os.getenv("LLM_RETRY_BASE_DELAY", "1.0"))
+LLM_RETRY_MAX_DELAY: float = float(os.getenv("LLM_RETRY_MAX_DELAY", "30.0"))
+
+# Every LLM provider this project has credentials for, by name. The jury
+# takes one juror per provider and the shared client takes its fallback
+# chain from the same place, so a vendor is configured once.
+PROVIDERS: Dict[str, Dict[str, str]] = {
+    "deepseek": {
         "model": os.getenv("LLM_MODEL_DEEP_SEEK", "deepseek-v4-pro"),
         "api_key": os.getenv("DEEP_SEEK_API_KEY", ""),
         "base_url": os.getenv("DEEP_SEEK_BASE_URL", "https://api.deepseek.com"),
     },
-    {
-        "name": "openai",
+    "openai": {
         "model": os.getenv("LLM_MODEL_OPEN_AI", "gpt-4o"),
         "api_key": os.getenv("OPEN_AI_API_KEY", ""),
         "base_url": os.getenv("OPEN_AI_BASE_URL", "https://api.openai.com/v1"),
     },
-    {
-        "name": "typesafe",
+    "typesafe": {
         "model": os.getenv("LLM_MODEL_TYPESAFE", ""),
         "api_key": os.getenv("TYPESAFE_API_KEY", ""),
         "base_url": os.getenv("TYPESAFE_BASE_URL", ""),
     },
+}
+
+# Providers that speak the OpenAI chat-completions API, and so can stand in
+# for one another inside LLMClient. Typesafe cannot: it has its own wire
+# format and its own client (src/shared/llm/typesafe_client.py), which is
+# why it is a juror but never a fallback.
+OPENAI_COMPATIBLE_PROVIDERS = frozenset({"deepseek", "openai"})
+
+# Jury Configuration -- one LLM provider per juror, so the panel is never
+# just one vendor's model grading itself. Each entry is passed as the model
+# parameters for one juror in src.jury.evaluators.EvaluatorPanel.
+JURY_PROVIDERS: List[Dict[str, str]] = [
+    {"name": name, **provider} for name, provider in PROVIDERS.items()
+]
+
+# Fallback chain for LLMClient: provider names, in order, tried when the
+# primary model has exhausted its retries or cannot serve the request at all
+# (bad key, model not found, provider down). Set LLM_FALLBACK_PROVIDERS= to
+# an empty value to disable fallbacks entirely.
+#
+# A fallback answers with a different vendor's model, which is the right
+# trade for a pipeline stage that just needs an answer and the wrong one for
+# the jury (whose independence is the point) and for an accuracy measurement
+# (whose report names one model) -- both of those pass fallbacks=() instead.
+LLM_FALLBACK_PROVIDER_NAMES: List[str] = [
+    name.strip().lower()
+    for name in os.getenv("LLM_FALLBACK_PROVIDERS", "openai").split(",")
+    if name.strip()
+]
+LLM_FALLBACK_PROVIDERS: List[Dict[str, str]] = [
+    {"name": name, **PROVIDERS[name]}
+    for name in LLM_FALLBACK_PROVIDER_NAMES
+    if name in PROVIDERS
+    and name in OPENAI_COMPATIBLE_PROVIDERS
+    # A provider with no key or no model would fail on every call, so it is
+    # not a fallback -- it is a slower way to report the same failure.
+    and PROVIDERS[name]["api_key"]
+    and PROVIDERS[name]["model"]
 ]
 
 # Jurors judge every rubric criterion independently in one call, and a
@@ -71,6 +115,17 @@ JURY_LLM_MAX_TOKENS: int = int(os.getenv("JURY_LLM_MAX_TOKENS", "8000"))
 # produced any output at all. Give these stages the same headroom as jurors.
 CLASSIFIER_LLM_MAX_TOKENS: int = int(
     os.getenv("CLASSIFIER_LLM_MAX_TOKENS", "8000")
+)
+
+# Classification is not generation: picking a label or a sentiment is a task
+# with one right answer, so sampling only adds variance. At the default
+# LLM_TEMPERATURE (0.7) repeated runs over the same inputs disagree with
+# themselves, which makes a measured accuracy change impossible to attribute
+# to the prompt rather than to the sampler. Scored on the Bitext goldenset
+# via scripts/eval_intent_accuracy.py, two runs of the same prompt differed
+# by ~1pp from sampling alone.
+CLASSIFIER_LLM_TEMPERATURE: float = float(
+    os.getenv("CLASSIFIER_LLM_TEMPERATURE", "0.0")
 )
 
 # Database Configuration
@@ -119,6 +174,20 @@ def validate_config() -> bool:
     """Validate required configuration parameters"""
     required = ["LLM_API_KEY", "LLM_MODEL"]
     missing = [param for param in required if not globals().get(param)]
+
+    # A fallback that was asked for but dropped (unknown name, no key, not
+    # OpenAI-compatible) would otherwise only show up as an outage, so say so
+    # here instead. It is a warning, not a failure: the primary still works.
+    usable = {provider["name"] for provider in LLM_FALLBACK_PROVIDERS}
+    unusable = [
+        name for name in LLM_FALLBACK_PROVIDER_NAMES if name not in usable
+    ]
+    if unusable:
+        print(
+            f"Warning: LLM fallback provider(s) not usable and ignored: "
+            f"{unusable} (unknown name, missing api_key/model, or not "
+            f"OpenAI-compatible)"
+        )
 
     if missing:
         print(f"Warning: Missing required config parameters: {missing}")

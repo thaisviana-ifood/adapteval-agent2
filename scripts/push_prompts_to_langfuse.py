@@ -21,8 +21,8 @@ from src.shared.logger import get_logger  # noqa: E402
 logger = get_logger(__name__)
 
 COMMIT_MESSAGE = (
-    "v3: add the SemanticAnalyzer classifier prompts "
-    "(key phrases, summary, sentiment)"
+    "v4: add the IntentAnalyzer classifier prompts (user intents open and "
+    "closed set, assistant objectives, alignment scoring)"
 )
 
 
