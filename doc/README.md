@@ -65,6 +65,10 @@ salva um snapshot do estado após cada nó.
   construindo o analisador em modo closed-set sobre a própria taxonomia do
   goldenset. Uma chamada de LLM por utterance, então use `--limit`/
   `--workers`.
+- **`scripts/dump_criteria.py`** — dumpa o catálogo de rubricas (tabela
+  `evaluation_criteria`) em JSON, tabela Markdown ou SQL, e com `--seed`
+  carrega as rubricas padrão num banco novo. Ver
+  [rule_generator.md](rule_generator.md#dump-do-catálogo--scriptsdump_criteriapy).
 - **`scripts/convert_multiturn_csv.py`** — converte o CSV multi-turn do
   Kaggle (colunas `P1,R1,...,P5`) para o schema de dataset JSON que
   `run_deep_agent.py` espera.

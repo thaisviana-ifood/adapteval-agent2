@@ -1,34 +1,74 @@
 """Heuristic checks for quick evaluation"""
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from src.shared.logger import get_logger
+from src.rule_generator.criteria_store import (
+    HEURISTIC,
+    CriteriaRepository,
+    get_criteria_repository,
+)
 
 logger = get_logger(__name__)
 
 
 class HeuristicChecker:
-    """Fast heuristic checks before detailed evaluation"""
+    """Fast heuristic checks before detailed evaluation
 
-    def __init__(self):
-        self.heuristics = {
-            "minimum_length": {
-                "description": "Response has minimum required length",
-                "check_fn": self._check_minimum_length,
-            },
-            "no_empty_response": {
-                "description": "Response is not empty",
-                "check_fn": self._check_not_empty,
-            },
-            "coherence": {
-                "description": "Response is coherent",
-                "check_fn": self._check_coherence,
-            },
-            "relevance": {
-                "description": "Response mentions relevant keywords",
-                "check_fn": self._check_relevance,
-            },
+    Which checks run is read from the criteria catalog (the `heuristic`
+    rows of `evaluation_criteria`), like the rest of the rubric; the checks
+    themselves are code here, bound to a catalog row by name.
+    """
+
+    def __init__(self, repository: Optional[CriteriaRepository] = None):
+        self.repository = repository or get_criteria_repository()
+        self.heuristics = self._load_heuristics()
+
+    def _check_functions(self) -> Dict[str, Any]:
+        """Every heuristic this class knows how to run, by catalog name"""
+        return {
+            "minimum_length": self._check_minimum_length,
+            "no_empty_response": self._check_not_empty,
+            "coherence": self._check_coherence,
+            "relevance": self._check_relevance,
         }
+
+    def _load_heuristics(self) -> Dict[str, Dict[str, Any]]:
+        """Bind the catalogued heuristics to their check functions
+
+        A catalogued name with no implementation here is skipped (it would
+        otherwise count as a silent failure in `pass_rate`); a catalog with
+        no heuristic rows at all falls back to running every check, so the
+        pipeline is never left without its cheap pre-jury filter.
+        """
+        check_functions = self._check_functions()
+        heuristics: Dict[str, Dict[str, Any]] = {}
+
+        for row in self.repository.get_mandatory(HEURISTIC):
+            name = row["name"]
+            check_fn = check_functions.get(name)
+            if check_fn is None:
+                logger.warning(
+                    f"Catalogued heuristic '{name}' has no implementation "
+                    f"in HeuristicChecker; skipping it"
+                )
+                continue
+            heuristics[name] = {
+                "description": row["description"],
+                "check_fn": check_fn,
+            }
+
+        if not heuristics:
+            logger.warning(
+                "No usable heuristics in the catalog; running all built-in "
+                "checks"
+            )
+            heuristics = {
+                name: {"description": name, "check_fn": check_fn}
+                for name, check_fn in check_functions.items()
+            }
+
+        return heuristics
 
     def check_all(
         self,

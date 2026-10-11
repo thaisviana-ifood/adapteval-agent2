@@ -152,15 +152,25 @@ pytest tests/test_context.py -v
 
 Results are written incrementally to `data/output/`.
 
-### PostgreSQL (optional)
+### PostgreSQL
 
 ```bash
 docker compose up -d postgres
 ```
 
-Set `USE_POSTGRES_MEMORY=true` to persist evaluation history and LangGraph
-checkpoints instead of keeping them in process memory. If the connection
-fails, both degrade silently back to in-memory.
+The rubric catalog (`evaluation_criteria`) lives here: stage 2 reads from it
+which criteria are mandatory and which apply to the task at hand, and writes
+back the criteria it creates at runtime. It is created and seeded on first
+use (`USE_POSTGRES_CRITERIA=true`, the default). Inspect it with:
+
+```bash
+python3 scripts/dump_criteria.py --format markdown --output -
+```
+
+Set `USE_POSTGRES_MEMORY=true` to also persist evaluation history and
+LangGraph checkpoints instead of keeping them in process memory. If the
+connection fails, all of these degrade back to in-memory — the catalog
+serves its seed rubric and forgets runtime additions at exit.
 
 ## Understanding Output
 

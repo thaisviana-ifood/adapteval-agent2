@@ -140,6 +140,16 @@ DB_NAME: str = os.getenv("DB_NAME", "adapteval_agent")
 # only in memory.
 USE_POSTGRES_MEMORY: bool = os.getenv("USE_POSTGRES_MEMORY", "False").lower() == "true"
 
+# The rubric catalog (src/rule_generator/criteria_store.py) is read from
+# PostgreSQL on every evaluation, so this defaults to on -- unlike the
+# history above, which is an optional archive. Setting it to "false" (or
+# simply having no reachable database) makes the catalog in-process: the
+# same seeded criteria are served, but criteria created during a run are
+# forgotten when it ends.
+USE_POSTGRES_CRITERIA: bool = (
+    os.getenv("USE_POSTGRES_CRITERIA", "True").lower() == "true"
+)
+
 # Vector DB Configuration (for memory)
 VECTOR_DB_HOST: str = os.getenv("VECTOR_DB_HOST", "localhost")
 VECTOR_DB_PORT: int = int(os.getenv("VECTOR_DB_PORT", "6379"))

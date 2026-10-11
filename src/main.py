@@ -162,8 +162,9 @@ class AdaptiveJuryAgent:
         # Define objectives
         objectives = self.objective_def.get_objectives(task_type)
 
-        # Generate criteria
-        criteria = self.criteria_gen.generate(context, objectives)
+        # Generate criteria (the task type selects the catalogued criteria
+        # this task, or a similar one, usually needs)
+        criteria = self.criteria_gen.generate(context, objectives, task_type)
 
         # Run heuristics
         heuristics = self.heuristic_checker.check_all(response, query)

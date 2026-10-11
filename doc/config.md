@@ -82,6 +82,7 @@ vazio). O `LLMClient` agora loga um aviso nomeando essa causa sempre que
 |---|---|---|
 | `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME` | `localhost`/`5432`/`admin`/``/`adapteval_agent` | Postgres, usado por `PostgresConnector` e no DSN do `PostgresSaver` (checkpointer do LangGraph) |
 | `USE_POSTGRES_MEMORY` | `False` | Liga persistência do histórico de avaliações (`HistoryTracker`) e do checkpointer do LangGraph em Postgres; sem isso, tudo fica só em memória do processo |
+| `USE_POSTGRES_CRITERIA` | `True` | Lê/grava o catálogo de rubricas (`evaluation_criteria`) no Postgres. Vem ligado porque o catálogo é a fonte de verdade da rubrica, não um arquivo opcional — ver [rule_generator.md](rule_generator.md#criteria_storepy--criteriarepository). Com `false`, ou sem banco acessível, o catálogo roda em memória: serve as mesmas rubricas padrão, mas critérios criados em runtime morrem com o processo |
 | `VECTOR_DB_HOST`/`VECTOR_DB_PORT`/`VECTOR_DB_NAME` | `localhost`/`6379`/`adapteval_vectors` | Lidas mas só consumidas pelo `VectorStore` placeholder (não conectado a nada real) |
 
 ## Logging / processamento

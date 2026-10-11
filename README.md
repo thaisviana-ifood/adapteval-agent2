@@ -52,14 +52,28 @@ provider is missing drops out of the vote rather than falling back to
 another vendor's model. Langfuse keys are optional; without them tracing and
 prompt management degrade to local-only behavior.
 
-### PostgreSQL (optional, for persistent memory)
+### PostgreSQL (for the rubric catalog, and optionally for memory)
 
 ```bash
 docker compose up -d postgres
 ```
 
-Set `USE_POSTGRES_MEMORY=true` in `.env` to persist evaluation history and
-LangGraph checkpoints to Postgres instead of keeping them in memory.
+Stage 2 reads its rubric from the `evaluation_criteria` table: which
+criteria are mandatory, which apply to a given (or similar) task type, and
+the criteria earlier runs invented. Criteria created at runtime are written
+back, so the rubric accumulates instead of being reinvented per call — see
+[`doc/rule_generator.md`](doc/rule_generator.md). The table is created and
+seeded automatically on first use (`USE_POSTGRES_CRITERIA`, on by default);
+without a reachable database the same seed rubric is served from memory and
+runtime additions are dropped at exit.
+
+```bash
+# Inspect the current rubric (JSON, Markdown table, or replayable SQL)
+python3 scripts/dump_criteria.py --format markdown --output -
+```
+
+Set `USE_POSTGRES_MEMORY=true` in `.env` to also persist evaluation history
+and LangGraph checkpoints to Postgres instead of keeping them in memory.
 
 ## Running
 

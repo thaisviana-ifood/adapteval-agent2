@@ -196,7 +196,7 @@ class PipelineNodes:
         classification = self.task_classifier.classify(context)
         task_type = classification["task_type"]
         objectives = self.objective_def.get_objectives(task_type)
-        criteria = self.criteria_gen.generate(context, objectives)
+        criteria = self.criteria_gen.generate(context, objectives, task_type)
         heuristics = self.heuristic_checker.check_all(response, query)
 
         logger.debug("Pipeline node 'rule_generation' complete")

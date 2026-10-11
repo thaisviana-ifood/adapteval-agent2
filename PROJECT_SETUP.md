@@ -49,9 +49,14 @@ dependency in this project.
 ### 3. Rule Generator (`src/rule_generator/`)
 - **TaskClassifier** — task type detection (rule-based keyword matching)
 - **ObjectiveDefinition** — success criteria and failure conditions
-- **CriteriaGenerator** — the boolean rubric: base + contextual criteria,
-  plus up to 3 LLM-proposed dynamic criteria
-- **HeuristicChecker** — fast, LLM-free validation checks
+- **CriteriaRepository** — the rubric catalog (`evaluation_criteria` table):
+  which criteria are mandatory, which belong to a task type or a similar
+  one, and where runtime-created criteria are stored
+- **CriteriaGenerator** — assembles one evaluation's boolean rubric from the
+  catalog: mandatory + contextual criteria, plus up to 3 LLM-proposed
+  dynamic criteria, which are catalogued for reuse
+- **HeuristicChecker** — fast, LLM-free validation checks, enabled per
+  catalog row
 
 ### 4. Jury Evaluation (`src/jury/`)
 - **LLMEvaluator** — one juror per OpenAI-compatible provider, built with

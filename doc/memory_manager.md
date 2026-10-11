@@ -74,7 +74,10 @@ essas chamadas, aliás) em `src/main.py`, a implementação legada.
 
 Camada de persistência opcional (`USE_POSTGRES_MEMORY=true`) sobre
 `shared/infra/database.py::PostgresConnector`. `ensure_schema()` aplica
-`docker/postgres/init.sql`. `save_evaluation`/`save_metric` fazem INSERT
+`docker/postgres/init.sql` — o mesmo arquivo que cria a tabela
+`evaluation_criteria` do catálogo de rubricas (ver
+[rule_generator.md](rule_generator.md#criteria_storepy--criteriarepository)),
+que é lida sempre, independente dessa flag. `save_evaluation`/`save_metric` fazem INSERT
 simples; `get_evaluation_history`/`get_metrics_history` fazem SELECT
 ordenado por `created_at DESC LIMIT n` e devolvem em ordem cronológica
 (`reversed`). Toda falha de conexão/query é logada e degrada para `False`/
